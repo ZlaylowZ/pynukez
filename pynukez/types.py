@@ -1,0 +1,304 @@
+"""
+Data models for Nukez SDK.
+
+All return types are dataclasses with explicit fields.
+Agents can access fields predictably: result.field_name
+"""
+
+from dataclasses import dataclass
+from typing import List, Optional, Dict, Any
+import hashlib
+
+@dataclass
+class StorageRequest:
+    """Payment instructions from request_storage().
+
+    Multi-chain support:
+      - Solana: amount_sol / amount_lamports are populated, pay_asset="SOL"
+      - EVM/Monad: amount / amount_raw / token_address / token_decimals populated
+    """
+    pay_req_id: str
+    pay_to_address: str
+    amount_sol: float
+    amount_lamports: int
+    network: str
+    units: int
+    provider: str = "gcs"
+    # EVM / multi-chain fields (Phase 2)
+    pay_asset: str = "SOL"
+    amount: Optional[str] = None          # human-readable amount (all chains)
+    amount_raw: Optional[int] = None      # atomic units (lamports / wei / token units)
+    token_address: Optional[str] = None   # ERC-20 contract address (EVM only)
+    token_decimals: Optional[int] = None  # token decimals (EVM only)
+
+    # Guide agent to next step
+    next_step: str = "Call solana_transfer() then confirm_storage()"
+
+    @property
+    def is_evm(self) -> bool:
+        """True if this is an EVM payment (Monad, Ethereum, etc.)."""
+        return any(tag in (self.network or "") for tag in ("monad", "ethereum", "evm", "arbitrum"))
+
+    def __post_init__(self):
+        if self.is_evm:
+            self.next_step = (
+                f"Transfer {self.amount or '?'} {self.pay_asset} "
+                f"to {self.pay_to_address} on {self.network}, then "
+                f"confirm_storage(pay_req_id='{self.pay_req_id}', tx_sig=<0x_tx_hash>)"
+            )
+        else:
+            self.next_step = (
+                f"Call solana_transfer(to_address='{self.pay_to_address}', "
+                f"amount_sol={self.amount_sol}) then "
+                f"confirm_storage(pay_req_id='{self.pay_req_id}', tx_sig=<result>)"
+            )
+
+@dataclass
+class Receipt:
+    """Storage receipt from confirmed payment."""
+    id: str  # receipt_id
+    units: int
+    payer_pubkey: str
+    network: str
+    created_at: Optional[str] = None
+    
+    def __post_init__(self):
+        self.receipt_id = self.id #agent-visible alias
+
+    @property
+    def locker_id(self) -> str:
+        """Compute locker_id from receipt_id."""
+        return "locker_" + hashlib.sha256(self.id.encode()).hexdigest()[:12]
+
+@dataclass
+class SignedEnvelope:
+    """Result from build_signed_envelope()."""
+    headers: Dict[str, str]  # X-Nukez-Envelope, X-Nukez-Signature
+    canonical_body: Optional[str]
+    locker_id: str
+    
+    # Include what agent needs to know
+    usage: str = "Add headers to your HTTP request"
+
+@dataclass
+class FileUrls:
+    """URLs for file operations."""
+    filename: str
+    upload_url: str
+    download_url: str
+    content_type: str
+    expires_in_sec: int
+    
+    # Agent guidance
+    next_steps: str = (
+        "PUT your raw bytes to upload_url via upload_bytes(upload_url=<the upload_url above>, "
+        "data='your content here'). The data string is sent as raw bytes in the HTTP PUT body. "
+        "Then GET via download_bytes(download_url=<the download_url above>)."
+    )
+
+@dataclass  
+class VerificationResult:
+    """Storage verification result with attestation data."""
+    receipt_id: str
+    verified: bool
+    result_hash: str
+    att_code: str = ""
+    verified_at: str = ""
+    # Phase 5 attestation fields
+    merkle_root: str = ""
+    manifest_signature: str = ""
+    file_count: int = 0
+    files: Optional[List[Dict[str, Any]]] = None  # [{filename, content_hash, size_bytes}, ...]
+    locker_id: str = ""
+    verify_url: str = ""
+    
+    @property
+    def status(self) -> str:
+        return "verified" if self.verified else "verification_failed"
+    
+    @property
+    def attested(self) -> bool:
+        """True if an on-chain attestation exists (merkle_root computed)."""
+        return bool(self.merkle_root)
+
+@dataclass
+class PriceInfo:
+    """Pricing information from get_price()."""
+    units: int
+    unit_price_usd: float
+    total_usd: float
+    amount_sol: float
+    amount_lamports: int
+    network: str
+    # Multi-chain pricing (Phase 2) — populated when pay_asset != SOL
+    pay_asset: str = "SOL"
+    amount: Optional[str] = None          # human-readable for any chain
+    amount_raw: Optional[int] = None      # atomic units for any chain
+
+@dataclass 
+class TransferResult:
+    """Result from solana_transfer()."""
+    signature: str
+    to_address: str
+    amount_sol: float
+    network: str
+
+@dataclass
+class NukezManifest:
+    """Locker provisioning result from provision_locker()."""
+    locker_id: str
+    receipt_id: str
+    bucket: str
+    path_prefix: str
+    tags: List[str]
+    cap_token: Optional[str] = None  # Capability token for file operations
+    cap_expires_in_sec: Optional[int] = None  # Token expiration
+    created_at: Optional[str] = None
+
+@dataclass
+class FileInfo:
+    """File information from list_files()."""
+    filename: str
+    content_type: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    object_key: Optional[str] = None
+
+@dataclass
+class ViewerLink:
+    """Portal link that can be returned by an autonomous agent."""
+    url: str
+    kind: str                    # "owner" or "file"
+    locker_id: str
+    receipt_id: str
+    filename: Optional[str] = None
+    download_url: Optional[str] = None
+    expires_in_sec: Optional[int] = None
+    includes_download_url: bool = False
+
+@dataclass
+class FileViewerInfo:
+    """File metadata enriched with a viewer portal URL."""
+    filename: str
+    content_type: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    object_key: Optional[str] = None
+    viewer_url: str = ""
+    download_url: Optional[str] = None
+    expires_in_sec: Optional[int] = None
+
+@dataclass
+class ViewerFileList:
+    """Owner portal + file list suitable for agent handoff."""
+    receipt_id: str
+    locker_id: str
+    owner_viewer_url: str
+    files: List[FileViewerInfo]
+
+@dataclass
+class ViewerContainer:
+    """Generic viewer container payload for MCP/agent handoff."""
+    contract: str
+    version: str
+    request_type: str
+    viewer_url: str
+    input: Dict[str, Any]
+    result: Dict[str, Any]
+    render_hints: Dict[str, Any]
+    auth_state: Dict[str, Any]
+    errors: List[Dict[str, Any]]
+    meta: Dict[str, Any]
+    ui: Dict[str, Any]
+
+@dataclass
+class UploadResult:
+    """Result from upload_bytes()."""
+    upload_url: str
+    size_bytes: int
+    content_type: Optional[str] = None
+    uploaded_at: int = 0
+
+@dataclass
+class DeleteResult:
+    """Result from delete_file()."""
+    filename: str
+    deleted: bool
+    deleted_at: Optional[str] = None
+
+@dataclass
+class WalletInfo:
+    """Wallet information from get_wallet_info()."""
+    pubkey: str
+    balance_sol: float
+    network: str
+
+@dataclass
+class DiscoveryDoc:
+    """Discovery document from discover()."""
+    api_version: str
+    service: str
+    description: str
+    auth_modes: List[str]
+    endpoints: Dict[str, str]
+    features: List[str]
+    status: str
+
+@dataclass
+class ConfirmResult:
+    """Result of confirming a file upload (server-side hash computation)."""
+    filename: str
+    content_hash: str          # sha256:... prefixed
+    size_bytes: int
+    confirmed: bool
+
+
+@dataclass
+class BatchConfirmResult:
+    """Result of confirming multiple file uploads."""
+    results: list              # List[ConfirmResult]
+    confirmed_count: int
+    failed_count: int
+
+
+@dataclass
+class AttestResult:
+    """Result of triggering attestation on a locker."""
+    receipt_id: str
+    merkle_root: str           # sha256:... prefixed
+    file_count: int
+    att_code: object           # int or None
+    status: str                # "complete" or "accepted"
+    push_ok: bool              # True if Switchboard push succeeded
+    tx_signature: object       # str or None
+    switchboard_slot: object   # int or None
+
+
+@dataclass
+class BatchUploadResult:
+    """Result of uploading multiple files concurrently."""
+    uploaded: int
+    failed: int
+    total: int
+    elapsed_sec: float
+    errors: list               # List[Tuple[str, str]] — (filename, error_message)
+    results: list              # List[UploadResult]
+
+@dataclass
+class DownloadedFile:
+    """ Result of downloading a single file. """
+    filename: str
+    content: bytes
+    content_hash: str
+    size_bytes: int
+    verified: bool
+
+@dataclass
+class BatchDownloadResult:
+    """Result of a batch download operation."""
+    downloaded: int
+    failed: int
+    total: int
+    elapsed_sec: float
+    errors: list
+    files: list

@@ -1,0 +1,114 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pynukez"
+version = "3.0.0"
+description = "Nukez SDK — agent-native storage with cryptographic verification"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Nukez", email = "dev@nukez.xyz"}
+]
+keywords = [
+    "ai",
+    "agent",
+    "autonomous",
+    "storage",
+    "solana",
+    "blockchain",
+    "cryptographic",
+    "verification",
+    "llm",
+    "tool-calling"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "requests>=2.28.0",
+    "pynacl>=1.5.0",
+    "base58>=2.1.0",
+]
+
+[project.optional-dependencies]
+solana = [
+    "solana>=0.30.0",
+    "solders>=0.18.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-mock>=3.10.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+    "types-requests>=2.28.0",
+    "python-dotenv>=1.0.0",
+]
+all = [
+    "pynukez[solana,dev]",
+]
+
+[project.urls]
+Homepage = "https://github.com/nukez/pynukez"
+Documentation = "https://docs.nukez.xyz/sdk/python"
+Repository = "https://github.com/nukez/pynukez"
+Issues = "https://github.com/nukez/pynukez/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pynukez*"]
+
+[tool.setuptools.package-data]
+pynukez = ["py.typed", "*.json"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311', 'py312']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+    | \.mypy_cache
+    | \.pytest_cache
+    | \.venv
+    | build
+    | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["pynukez"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+markers = [
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
