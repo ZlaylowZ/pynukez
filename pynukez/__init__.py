@@ -234,13 +234,9 @@ def get_agent_instructions() -> dict:
         },
 
         "storage_providers": {
-            "gcs": "General-purpose object storage (default)",
-            "mongodb": "Document store, 16MB per-file limit, no signed URLs",
-            "firestore": "Document store, 1MB per-file limit, no signed URLs",
-            "storj": "Decentralized, S3-compatible",
-            "arweave": "Permanent, immutable — files cannot be deleted or modified",
-            "filecoin": "Content-addressed decentralized storage",
-            "note": "Use get_provider_info(provider) to check capabilities before selecting.",
+            "note": "Available providers are determined by the gateway configuration. "
+                    "Default is gcs. Use get_provider_info(provider) for capability details. "
+                    "The gateway will reject providers that are not enabled.",
         },
         
         "important_note": (
@@ -382,10 +378,9 @@ def get_tool_definitions() -> list:
                         },
                         "provider": {
                             "type": "string",
-                            "enum": ["gcs", "mongodb", "firestore", "storj", "arweave", "filecoin"],
-                            "description": "Storage backend. gcs=general purpose, mongodb=documents (16MB limit), "
-                                           "firestore=documents (1MB limit), storj=decentralized S3, "
-                                           "arweave=permanent immutable, filecoin=content-addressed."
+                            "default": "gcs",
+                            "description": "Storage backend (default: gcs). Available providers are "
+                                           "determined by the gateway. Common options: gcs, mongodb."
                         },
                         "pay_network": {
                             "type": "string",
@@ -464,8 +459,8 @@ def get_tool_definitions() -> list:
                     "properties": {
                         "provider": {
                             "type": "string",
-                            "enum": ["gcs", "mongodb", "firestore", "storj", "arweave", "filecoin"],
-                            "description": "Provider ID to look up"
+                            "description": "Provider ID to look up (e.g. gcs, mongodb). "
+                                           "See PROVIDERS dict for known provider capabilities."
                         }
                     },
                     "required": ["provider"]
