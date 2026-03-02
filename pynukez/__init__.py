@@ -46,7 +46,8 @@ from .types import (
     StorageRequest,
     TransferResult,
     Receipt,
-    
+    PaymentOption,
+
     # File operation types
     NukezManifest,
     FileUrls,
@@ -57,12 +58,16 @@ from .types import (
     ViewerContainer,
     UploadResult,
     DeleteResult,
-    
+
     # Utility types
     VerificationResult,
     WalletInfo,
     PriceInfo,
     DiscoveryDoc,
+
+    # Provider awareness
+    ProviderInfo,
+    PROVIDERS,
 
     # Batch and Attest types
     ConfirmResult,
@@ -85,6 +90,13 @@ from .errors import (
     RateLimitError,               # API rate limit hit
 )
 
+# EVM payment support (optional — requires pip install pynukez[evm])
+try:
+    from .evm_payment import EVMPayment, HAS_WEB3
+except ImportError:
+    EVMPayment = None
+    HAS_WEB3 = False
+
 # Authentication utilities
 from .auth import (
     Keypair,
@@ -100,7 +112,7 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 
 __all__ = [
     # Main client
@@ -108,8 +120,10 @@ __all__ = [
     
     # Data types - Payment Flow
     "StorageRequest",
-    "TransferResult", 
+    "TransferResult",
     "Receipt",
+    "PaymentOption",
+    "EVMPayment",
     
     # Data types - File Operations
     "SignedEnvelope",
@@ -128,6 +142,10 @@ __all__ = [
     "WalletInfo",
     "PriceInfo",
     "DiscoveryDoc",
+
+    # Provider awareness
+    "ProviderInfo",
+    "PROVIDERS",
 
     # Error classes
     "NukezError",
@@ -181,12 +199,14 @@ def get_agent_instructions() -> dict:
         "installation": {
             "basic": "pip install pynukez",
             "with_solana": "pip install pynukez[solana]",
+            "with_evm": "pip install pynukez[evm]",
+            "with_all": "pip install pynukez[all]",
             "development": "pip install pynukez[dev]"
         },
-        
+
         "quickstart_flow": [
             "1. client = Nukez(keypair_path='~/.config/solana/id.json')",
-            "2. request = client.request_storage(units=1)", 
+            "2. request = client.request_storage(units=1)",
             "3. transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)",
             "4. receipt = client.confirm_storage(request.pay_req_id, transfer.signature)",
             "5. manifest = client.provision_locker(receipt.id)",
@@ -194,6 +214,34 @@ def get_agent_instructions() -> dict:
             "7. client.upload_bytes(urls.upload_url, b'Hello!')",
             "8. data = client.download_bytes(urls.download_url)"
         ],
+
+        "payment_flow": {
+            "description": (
+                "After request_storage(), check the response to determine the payment chain. "
+                "The response includes payment_options listing ALL available chain/asset combinations."
+            ),
+            "solana": (
+                "If request.is_evm is False: call solana_transfer(request.pay_to_address, request.amount_sol)"
+            ),
+            "evm": (
+                "If request.is_evm is True: call evm_transfer(request.pay_to_address, request.amount_raw, "
+                "pay_asset=request.pay_asset, token_address=request.token_address, network=request.network)"
+            ),
+            "confirm": (
+                "Then call confirm_storage(request.pay_req_id, transfer.tx_hash). "
+                "For EVM payments, also pass payment_chain=request.network, payment_asset=request.pay_asset."
+            ),
+        },
+
+        "storage_providers": {
+            "gcs": "General-purpose object storage (default)",
+            "mongodb": "Document store, 16MB per-file limit, no signed URLs",
+            "firestore": "Document store, 1MB per-file limit, no signed URLs",
+            "storj": "Decentralized, S3-compatible",
+            "arweave": "Permanent, immutable — files cannot be deleted or modified",
+            "filecoin": "Content-addressed decentralized storage",
+            "note": "Use get_provider_info(provider) to check capabilities before selecting.",
+        },
         
         "important_note": (
             "Most file operations require receipt_id (not locker_id) because "
@@ -214,9 +262,11 @@ def get_agent_instructions() -> dict:
                 "health_check": "Verify API availability"
             },
             "payment": {
-                "request_storage": "Start x402 payment flow - returns payment instructions",
-                "solana_transfer": "Execute SOL payment to Nukez address",
-                "confirm_storage": "Confirm payment and get receipt (SAVE receipt.id!)"
+                "request_storage": "Start x402 payment flow - returns payment instructions with payment_options",
+                "solana_transfer": "Execute SOL payment (Solana chain)",
+                "evm_transfer": "Execute EVM payment — MON/USDC/USDT/WETH (Monad, Ethereum, etc.)",
+                "confirm_storage": "Confirm payment and get receipt (SAVE receipt.id!)",
+                "get_provider_info": "Check provider capabilities and limits before selecting",
             },
             "storage": {
                 "provision_locker": "Create storage namespace (one-time per receipt)",
@@ -276,14 +326,19 @@ def get_agent_instructions() -> dict:
             "All signed operations require keypair_path in Nukez()"
         ],
         
-        "networks": ["devnet", "mainnet-beta"],
-        
+        "networks": {
+            "solana": ["solana-devnet", "solana-mainnet-beta"],
+            "evm": ["monad-testnet", "monad-mainnet"],
+        },
+
         "requirements": {
             "python": ">=3.9",
-            "solana_keypair": "Required for payments and signed requests",
+            "solana_keypair": "Required for Solana payments and signed requests",
+            "evm_private_key": "Required for EVM payments (hex string or raw 32 bytes)",
             "dependencies": {
                 "core": ["requests", "pynacl", "base58"],
-                "payments": ["solana", "solders"]
+                "solana_payments": ["solana", "solders"],
+                "evm_payments": ["web3", "eth-account"],
             }
         }
     }
@@ -315,7 +370,7 @@ def get_tool_definitions() -> list:
             "type": "function",
             "function": {
                 "name": "nukez_request_storage",
-                "description": "Start x402 payment flow to purchase Nukez storage. Returns payment instructions including pay_req_id, pay_to_address, and amount_sol.",
+                "description": "Start x402 payment flow to purchase Nukez storage. Returns payment instructions including pay_req_id, pay_to_address, amount_sol, and payment_options listing all available chain/asset combinations.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -324,6 +379,21 @@ def get_tool_definitions() -> list:
                             "description": "Number of storage units to purchase",
                             "default": 1,
                             "minimum": 1
+                        },
+                        "provider": {
+                            "type": "string",
+                            "enum": ["gcs", "mongodb", "firestore", "storj", "arweave", "filecoin"],
+                            "description": "Storage backend. gcs=general purpose, mongodb=documents (16MB limit), "
+                                           "firestore=documents (1MB limit), storj=decentralized S3, "
+                                           "arweave=permanent immutable, filecoin=content-addressed."
+                        },
+                        "pay_network": {
+                            "type": "string",
+                            "description": "Payment chain. Examples: solana-devnet, monad-testnet, monad-mainnet"
+                        },
+                        "pay_asset": {
+                            "type": "string",
+                            "description": "Token to pay with. SOL (Solana), USDC/USDT/MON/WETH (Monad)"
                         }
                     },
                     "required": []
@@ -354,7 +424,58 @@ def get_tool_definitions() -> list:
         {
             "type": "function",
             "function": {
-                "name": "nukez_confirm_storage", 
+                "name": "nukez_evm_transfer",
+                "description": "Execute EVM token transfer for storage payment (Monad, Ethereum, etc.). Use when request_storage() returns an EVM network (is_evm=True). Requires pynukez[evm].",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "to_address": {
+                            "type": "string",
+                            "description": "Destination 0x address (from request_storage().pay_to_address)"
+                        },
+                        "amount_raw": {
+                            "type": "integer",
+                            "description": "Atomic units (from request_storage().amount_raw)"
+                        },
+                        "pay_asset": {
+                            "type": "string",
+                            "description": "Token symbol (from request_storage().pay_asset). e.g. MON, USDC, USDT, WETH"
+                        },
+                        "token_address": {
+                            "type": "string",
+                            "description": "ERC-20 contract address (from request_storage().token_address). Omit for native tokens."
+                        },
+                        "network": {
+                            "type": "string",
+                            "description": "EVM network (from request_storage().network). e.g. monad-testnet, monad-mainnet"
+                        }
+                    },
+                    "required": ["to_address", "amount_raw"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "nukez_get_provider_info",
+                "description": "Get capabilities and limits for a storage provider. Use before selecting a provider for request_storage().",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "provider": {
+                            "type": "string",
+                            "enum": ["gcs", "mongodb", "firestore", "storj", "arweave", "filecoin"],
+                            "description": "Provider ID to look up"
+                        }
+                    },
+                    "required": ["provider"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "nukez_confirm_storage",
                 "description": "Confirm payment and receive storage receipt. CRITICAL: The response contains receipt_id (aliased as 'id') — save it. Every subsequent operation (provision_locker, create_file, list_files, verify_storage) requires this receipt_id.",
                 "parameters": {
                     "type": "object",

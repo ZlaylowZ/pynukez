@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pynukez"
-version = "3.0.0"
+version = "3.1.0"
 description = "Nukez SDK — agent-native storage with cryptographic verification"
 readme = "README.md"
 license = {text = "MIT"}
@@ -50,6 +50,10 @@ solana = [
     "solana>=0.30.0",
     "solders>=0.18.0",
 ]
+evm = [
+    "web3>=6.0.0",
+    "eth-account>=0.10.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
@@ -61,7 +65,7 @@ dev = [
     "python-dotenv>=1.0.0",
 ]
 all = [
-    "pynukez[solana,dev]",
+    "pynukez[solana,evm,dev]",
 ]
 
 [project.urls]

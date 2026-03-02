@@ -123,34 +123,52 @@ class Nukez:
         base_url: str = "https://api.nukez.xyz",
         network: str = "devnet",
         rpc_url: Optional[str] = "https://api.devnet.solana.com",
-        timeout: int = None
+        timeout: int = None,
+        evm_private_key_path: Optional[Union[str, Path]] = None,
+        evm_rpc_url: Optional[str] = None,
     ):
         """
         Initialize Nukez client.
-        
+
         Args:
-            keypair_path: Path to Solana keypair file (required for payments and signed requests)
+            keypair_path: Path to Solana keypair file (required for Solana payments and signed requests)
             base_url: Nukez API base URL
             network: Solana network ("devnet" or "mainnet-beta")
-            
+            rpc_url: Solana RPC URL
+            timeout: HTTP timeout in seconds
+            evm_private_key_path: Path to EVM private key file (hex string or raw 32 bytes).
+                                  Required for EVM payments (Monad, Ethereum, etc.)
+            evm_rpc_url: EVM RPC URL override. If not set, uses env vars
+                        (MONAD_MAINNET_RPC_PRIMARY, MONAD_TESTNET_RPC_PRIMARY, etc.)
+
         Example:
+            # Solana only
             client = Nukez(keypair_path="~/.config/solana/id.json", network="devnet")
+
+            # Multi-chain (Solana + Monad)
+            client = Nukez(
+                keypair_path="~/.config/solana/id.json",
+                evm_private_key_path="~/.nukez/evm_key.hex",
+            )
         """
-        
+
         self.base_url = base_url.rstrip('/')
         self.network = network
         self.rpc_url = rpc_url
         self.timeout = timeout or 120
         self.http = HTTPClient(base_url, timeout=self.timeout)
-        
+
         # Optional keypair for signing operations
         self.keypair: Optional[Keypair] = None
         if keypair_path:
             self.keypair = Keypair(keypair_path)
-        
-        # Lazy-initialized payment handler
+
+        # Lazy-initialized payment handlers
         self._payment = None
         self._keypair_path = keypair_path
+        self._evm_private_key_path = evm_private_key_path
+        self._evm_rpc_url = evm_rpc_url
+        self._evm_payment = None
         self._upload_jobs: Dict[str, Dict[str, Any]] = {}
         self._upload_jobs_lock = threading.Lock()
 
@@ -170,24 +188,56 @@ class Nukez:
     def get_price(self, units: int = 1) -> PriceInfo:
         """
         Get current storage pricing.
-        
+
         Args:
             units: Number of storage units
-            
+
         Returns:
             PriceInfo with pricing details
         """
         response = self.http.get("/v1/price", params={"units": units})
-        
+        meta = response.get("meta", {})
+        sol = meta.get("sol", {})
+
         return PriceInfo(
             units=units,
             unit_price_usd=response.get("unit_price_usd", 0.0),
-            total_usd=response.get("total_usd", 0.0),
-            amount_sol=response.get("amount_sol", 0.0),
-            amount_lamports=response.get("amount_lamports", 0),
-            network=response.get("network", self.network)
+            total_usd=meta.get("total_usd", response.get("unit_price_usd", 0.0) * units),
+            amount_sol=float(sol.get("amount_sol", 0) or 0),
+            amount_lamports=int(sol.get("amount_lamports", 0) or 0),
+            network=meta.get("network", self.network),
+            pay_asset=meta.get("pay_asset", "SOL"),
+            provider=meta.get("provider", ""),
+            mode=meta.get("mode", "static"),
+            cost_breakdown={
+                "base_cost": meta.get("base_cost"),
+                "attestation_fee": meta.get("attestation_fee"),
+                "egress_allowance": meta.get("egress_allowance"),
+                "margin": meta.get("margin"),
+                "discount": meta.get("discount"),
+            } if meta else None,
+            payment_options=meta.get("payment_options"),
         )
-    
+
+    def get_provider_info(self, provider: str = "gcs"):
+        """
+        Get capabilities for a storage provider.
+
+        Args:
+            provider: Provider ID ("gcs", "mongodb", "firestore", "storj", "arweave", "filecoin")
+
+        Returns:
+            ProviderInfo with capabilities and limits.
+        """
+        from .types import PROVIDERS
+        info = PROVIDERS.get(provider)
+        if not info:
+            raise NukezError(
+                f"Unknown provider '{provider}'. "
+                f"Available: {', '.join(PROVIDERS.keys())}"
+            )
+        return info
+
     # =========================================================================
     # PAYMENT FLOW (3 explicit steps)
     # =========================================================================
@@ -204,8 +254,13 @@ class Nukez:
 
         Args:
             units: Number of storage units to purchase
-            provider: Optional storage backend ("gcs", "mongodb"). Default: server
-                      default (gcs). MongoDB is for document/RAG workloads (16MB limit).
+            provider: Storage backend (default: server default, "gcs"). Options:
+                      "gcs"       — Google Cloud Storage, general-purpose.
+                      "mongodb"   — Document/RAG store (16 MB per-doc limit).
+                      "storj"     — Decentralized, S3-compatible storage.
+                      "arweave"   — Permanent, immutable storage.
+                      "filecoin"  — Content-addressed decentralized storage.
+                      "firestore" — Firebase document store.
             pay_network: Payment chain. Default: Solana devnet.
                          Examples: "solana-devnet", "monad-testnet", "monad-mainnet"
             pay_asset: Token to pay with. Default: "SOL".
@@ -254,6 +309,13 @@ class Nukez:
                 amount_raw=e.amount_raw or None,
                 token_address=e.token_address or None,
                 token_decimals=e.token_decimals or None,
+                # Quote lifecycle fields
+                payment_options=e.payment_options,
+                quote_expires_at=e.quote_expires_at,
+                quote_schema=e.details.get("quote_schema"),
+                idempotency_key=e.details.get("idempotency_key"),
+                terms=e.terms,
+                price_breakdown=e.details.get("price_breakdown"),
             )
             return request
     
@@ -300,43 +362,129 @@ class Nukez:
         )
 
         return result
-    
+
+    def evm_transfer(
+        self,
+        to_address: str,
+        amount_raw: int,
+        pay_asset: str = "MON",
+        token_address: Optional[str] = None,
+        network: str = "monad-testnet",
+    ) -> TransferResult:
+        """
+        Step 2 (EVM): Execute EVM token transfer for storage payment.
+
+        Use when request_storage() returns an EVM network (is_evm=True).
+
+        Args:
+            to_address: Destination 0x address (from request.pay_to_address)
+            amount_raw: Atomic units (from request.amount_raw)
+            pay_asset: Token symbol (from request.pay_asset)
+            token_address: ERC-20 contract (from request.token_address, None for native)
+            network: EVM network (from request.network)
+
+        Returns:
+            TransferResult with tx_hash for confirm_storage()
+
+        Next step:
+            Call confirm_storage(pay_req_id=request.pay_req_id, tx_sig=result.tx_hash,
+                                payment_chain=request.network, payment_asset=request.pay_asset)
+
+        Example:
+            request = client.request_storage(units=1, pay_network="monad-testnet", pay_asset="MON")
+            if request.is_evm:
+                transfer = client.evm_transfer(
+                    to_address=request.pay_to_address,
+                    amount_raw=request.amount_raw,
+                    pay_asset=request.pay_asset,
+                    token_address=request.token_address,
+                    network=request.network,
+                )
+                receipt = client.confirm_storage(
+                    request.pay_req_id, transfer.tx_hash,
+                    payment_chain=request.network,
+                    payment_asset=request.pay_asset,
+                )
+        """
+        if self._evm_payment is None:
+            if not self._evm_private_key_path:
+                raise NukezError(
+                    "EVM private key not configured. Pass evm_private_key_path "
+                    "to the Nukez constructor, or use solana_transfer() for "
+                    "Solana payments."
+                )
+            from .evm_payment import EVMPayment
+            self._evm_payment = EVMPayment(
+                private_key_path=self._evm_private_key_path,
+                network=network,
+                rpc_url=self._evm_rpc_url,
+            )
+
+        tx_hash = self._evm_payment.transfer(
+            to_address=to_address,
+            amount_raw=amount_raw,
+            pay_asset=pay_asset,
+            token_address=token_address,
+        )
+
+        return TransferResult(
+            signature=tx_hash,
+            to_address=to_address,
+            amount_sol=0.0,
+            network=network,
+            chain="evm",
+            pay_asset=pay_asset,
+            amount_raw=amount_raw,
+            tx_hash=tx_hash,
+        )
+
     def confirm_storage(
-        self, 
-        pay_req_id: str, 
+        self,
+        pay_req_id: str,
         tx_sig: str,
         max_retries: int = 5,
-        initial_delay: float = 2.0
+        initial_delay: float = 2.0,
+        payment_chain: Optional[str] = None,
+        payment_asset: Optional[str] = None,
     ) -> Receipt:
         """
         Step 3: Confirm payment and receive storage receipt.
-        
+
         FIXED: Now includes retry logic for transaction propagation delays,
         matching the working nukez implementation.
-        
+
         Args:
             pay_req_id: Payment request ID from request_storage()
-            tx_sig: Transaction signature from solana_transfer()
+            tx_sig: Transaction signature from solana_transfer() or evm_transfer()
             max_retries: Maximum retry attempts for tx_not_found (default: 5)
             initial_delay: Initial delay in seconds, doubles each retry (default: 2.0)
-            
+            payment_chain: Payment chain override (e.g. "monad-testnet") — Phase 1
+            payment_asset: Payment asset override (e.g. "MON") — Phase 1
+
         Returns:
             Receipt with:
             - id: Receipt ID (SAVE THIS - needed for all file operations)
             - units: Storage units purchased
             - payer_pubkey: Your wallet address
-            - network: Solana network
+            - network: Network used
+            - provider: Storage backend
+            - pay_asset: Token used for payment
+            - tx_hash: Chain-agnostic transaction identifier
             - locker_id: Derived locker ID (convenience property)
-            
+
         Next step:
             Call provision_locker(receipt_id=receipt.id) to create storage space
-            
+
         Note:
             Transaction may take 10-30 seconds to confirm on-chain.
             This method automatically retries on tx_not_found errors.
         """
         url = f"{self.base_url}/v1/storage/confirm"
         payload = {"pay_req_id": pay_req_id}
+        if payment_chain:
+            payload["payment_chain"] = payment_chain
+        if payment_asset:
+            payload["payment_asset"] = payment_asset
         headers = {
             "Content-Type": "application/json",
             "X402-TX": tx_sig
@@ -357,12 +505,23 @@ class Nukez:
                 # Success!
                 if resp.status_code == 200:
                     data = resp.json()
+                    rcpt = data.get("receipt", {})
                     receipt = Receipt(
                         id=data["receipt_id"],
-                        units=data.get("units", 1),
-                        payer_pubkey=data.get("payer_pubkey", ""),
-                        network=data.get("network", self.network),
-                        created_at=data.get("created_at")
+                        units=rcpt.get("units", data.get("units", 1)),
+                        payer_pubkey=data.get("payer_pubkey", rcpt.get("payer_pubkey", "")),
+                        network=rcpt.get("network", self.network),
+                        created_at=rcpt.get("created_at"),
+                        provider=rcpt.get("provider", ""),
+                        pay_asset=rcpt.get("pay_asset", "SOL"),
+                        tx_hash=rcpt.get("tx_hash", data.get("tx_sig", "")),
+                        paid_amount=str(rcpt.get("paid_amount", "")) if rcpt.get("paid_amount") else None,
+                        paid_raw=rcpt.get("paid_raw"),
+                        block_number=rcpt.get("block_number"),
+                        slot=rcpt.get("slot"),
+                        sig_alg=data.get("sig_alg", rcpt.get("receipt_sig_alg", "")),
+                        unit_price_usd=float(rcpt.get("unit_price_usd", 0)),
+                        price_usd=float(rcpt.get("price_usd", 0)),
                     )
                     return receipt
                 

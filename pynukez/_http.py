@@ -146,6 +146,15 @@ class HTTPClient:
             if amount_sol and not amount_lamports:
                 amount_lamports = int(float(amount_sol) * 1_000_000_000)
 
+            # Quote lifecycle fields
+            payment_options = error_details.get("payment_options")
+            quote_expires_at = error_details.get("quote_expires_at")
+            terms = error_details.get("terms")
+            # Also extract for downstream passthrough (stored in error details dict)
+            quote_schema = error_details.get("quote_schema")
+            idempotency_key = error_details.get("idempotency_key")
+            price_breakdown = error_details.get("price")  # nested price object
+
             # Debug logging if fields are missing
             if not pay_req_id or not pay_to_address:
                 import sys
@@ -153,7 +162,7 @@ class HTTPClient:
                 print(f"[nukez] Response keys: {list(error_details.keys())}", file=sys.stderr)
                 print(f"[nukez] pay_req_id={pay_req_id!r}, pay_to_address={pay_to_address!r}", file=sys.stderr)
 
-            raise PaymentRequiredError(
+            err = PaymentRequiredError(
                 pay_req_id=str(pay_req_id) if pay_req_id else "",
                 pay_to_address=str(pay_to_address) if pay_to_address else "",
                 amount_sol=float(amount_sol) if amount_sol else 0.0,
@@ -164,7 +173,18 @@ class HTTPClient:
                 amount_raw=amount_raw,
                 token_address=token_address,
                 token_decimals=token_decimals,
+                payment_options=payment_options,
+                quote_expires_at=quote_expires_at,
+                terms=terms,
             )
+            # Stash extra fields for request_storage() passthrough
+            if price_breakdown:
+                err.details["price_breakdown"] = price_breakdown
+            if quote_schema:
+                err.details["quote_schema"] = quote_schema
+            if idempotency_key:
+                err.details["idempotency_key"] = idempotency_key
+            raise err
         
         # 401/403 Authentication errors
         if response.status_code in (401, 403):

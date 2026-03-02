@@ -31,6 +31,14 @@ class StorageRequest:
     token_address: Optional[str] = None   # ERC-20 contract address (EVM only)
     token_decimals: Optional[int] = None  # token decimals (EVM only)
 
+    # Quote lifecycle (from 402 response)
+    payment_options: Optional[List[Dict[str, Any]]] = None   # all chain/asset combos
+    quote_expires_at: Optional[int] = None                    # unix timestamp
+    quote_schema: Optional[str] = None                        # "dl_quote_v3"
+    idempotency_key: Optional[str] = None
+    terms: Optional[Dict[str, Any]] = None                    # storage limits, TTL, file limits
+    price_breakdown: Optional[Dict[str, Any]] = None          # cost components from price object
+
     # Guide agent to next step
     next_step: str = "Call solana_transfer() then confirm_storage()"
 
@@ -52,6 +60,11 @@ class StorageRequest:
                 f"amount_sol={self.amount_sol}) then "
                 f"confirm_storage(pay_req_id='{self.pay_req_id}', tx_sig=<result>)"
             )
+        if self.payment_options:
+            self.next_step += (
+                f" ({len(self.payment_options)} payment option(s) available — "
+                f"check payment_options for alternatives.)"
+            )
 
 @dataclass
 class Receipt:
@@ -61,7 +74,19 @@ class Receipt:
     payer_pubkey: str
     network: str
     created_at: Optional[str] = None
-    
+
+    # Multi-chain & provider fields (from confirm response)
+    provider: str = ""                          # storage backend used
+    pay_asset: str = "SOL"                      # token used for payment
+    tx_hash: str = ""                           # chain-agnostic tx identifier
+    paid_amount: Optional[str] = None           # human-readable amount paid
+    paid_raw: Optional[int] = None              # atomic units paid
+    block_number: Optional[int] = None          # EVM only
+    slot: Optional[int] = None                  # Solana only
+    sig_alg: str = ""                           # "ed25519" or "secp256k1"
+    unit_price_usd: float = 0.0
+    price_usd: float = 0.0
+
     def __post_init__(self):
         self.receipt_id = self.id #agent-visible alias
 
@@ -134,14 +159,40 @@ class PriceInfo:
     pay_asset: str = "SOL"
     amount: Optional[str] = None          # human-readable for any chain
     amount_raw: Optional[int] = None      # atomic units for any chain
+    # Extended pricing fields
+    provider: str = ""                                  # which provider was priced
+    mode: str = "static"                                # "static" or "override"
+    cost_breakdown: Optional[Dict[str, Any]] = None     # base, attestation, egress, margin
+    payment_options: Optional[List[Dict[str, Any]]] = None
 
-@dataclass 
+@dataclass
+class PaymentOption:
+    """One chain/asset payment path from the 402 response."""
+    chain: str              # "solana-devnet", "monad-mainnet"
+    asset: str              # "SOL", "USDC", "USDT", "MON", "WETH"
+    amount: str             # human-readable
+    amount_raw: int         # atomic units
+    treasury: str           # destination address
+    decimals: int           # token decimals
+    token_contract: Optional[str] = None   # ERC-20 address (EVM only)
+
+@dataclass
 class TransferResult:
-    """Result from solana_transfer()."""
-    signature: str
+    """Result from solana_transfer() or evm_transfer()."""
+    signature: str          # Solana sig (base58) or EVM tx hash (0x-prefixed)
     to_address: str
-    amount_sol: float
+    amount_sol: float       # SOL amount (0.0 for EVM transfers)
     network: str
+
+    # Multi-chain fields
+    chain: str = "solana"           # "solana" or "monad" or "ethereum"
+    pay_asset: str = "SOL"          # token symbol
+    amount_raw: Optional[int] = None  # atomic units (lamports, wei, token units)
+    tx_hash: str = ""               # chain-agnostic alias for signature
+
+    def __post_init__(self):
+        if not self.tx_hash:
+            self.tx_hash = self.signature
 
 @dataclass
 class NukezManifest:
@@ -243,6 +294,28 @@ class DiscoveryDoc:
     endpoints: Dict[str, str]
     features: List[str]
     status: str
+
+@dataclass(frozen=True)
+class ProviderInfo:
+    """Storage provider metadata and capabilities."""
+    id: str                                     # "gcs", "mongodb", etc.
+    supports_signed_urls: bool = True
+    supports_streaming: bool = True
+    max_object_size: Optional[int] = None       # bytes, None = no limit
+    immutable: bool = False                     # True for arweave
+    content_addressed: bool = False             # True for arweave, filecoin
+
+
+# Static registry mirroring gateway/app/core/storage_providers/
+PROVIDERS: Dict[str, ProviderInfo] = {
+    "gcs":       ProviderInfo("gcs"),
+    "mongodb":   ProviderInfo("mongodb", supports_signed_urls=False, supports_streaming=False, max_object_size=16_777_216),
+    "firestore": ProviderInfo("firestore", supports_signed_urls=False, supports_streaming=False, max_object_size=1_048_576),
+    "storj":     ProviderInfo("storj"),
+    "arweave":   ProviderInfo("arweave", immutable=True, content_addressed=True),
+    "filecoin":  ProviderInfo("filecoin", content_addressed=True),
+}
+
 
 @dataclass
 class ConfirmResult:

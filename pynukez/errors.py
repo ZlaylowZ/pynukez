@@ -81,6 +81,10 @@ class PaymentRequiredError(NukezError):
         amount_raw: int = 0,
         token_address: str = "",
         token_decimals: int = 0,
+        # Quote lifecycle fields
+        payment_options: list = None,
+        quote_expires_at: int = None,
+        terms: dict = None,
     ):
         is_evm = any(tag in (network or "") for tag in ("monad", "ethereum", "evm", "arbitrum"))
         if is_evm and amount:
@@ -109,6 +113,12 @@ class PaymentRequiredError(NukezError):
             details["token_address"] = token_address
         if token_decimals:
             details["token_decimals"] = token_decimals
+        if payment_options:
+            details["payment_options"] = payment_options
+        if quote_expires_at is not None:
+            details["quote_expires_at"] = quote_expires_at
+        if terms:
+            details["terms"] = terms
         super().__init__(message, details=details)
         self.pay_req_id = pay_req_id
         self.pay_to_address = pay_to_address
@@ -120,6 +130,9 @@ class PaymentRequiredError(NukezError):
         self.amount_raw = amount_raw
         self.token_address = token_address
         self.token_decimals = token_decimals
+        self.payment_options = payment_options
+        self.quote_expires_at = quote_expires_at
+        self.terms = terms
         self.retryable = False  # Need to pay first
 
 
@@ -281,43 +294,66 @@ class NukezNotProvisionedError(NukezError):
 
 class InsufficientFundsError(NukezError):
     """
-    Wallet doesn't have enough SOL for the operation.
-    
-    The Solana wallet balance is too low to complete the payment
-    including transaction fees.
-    
+    Wallet doesn't have enough funds for the operation.
+
+    Works for both Solana (SOL) and EVM chains (MON, USDC, etc.).
+
     Recovery:
         1. Check balance with get_wallet_info()
-        2. Add SOL to your wallet
-        3. On devnet, use: solana airdrop 2 --url devnet
-    
+        2. Add funds to your wallet
+        3. On devnet/testnet, use a faucet
+
     Attributes:
-        required_sol: Amount of SOL needed
-        available_sol: Current wallet balance
-        network: Solana network
+        required: Amount needed (human-readable units)
+        available: Current balance (human-readable units)
+        network: Network identifier
+        asset: Token symbol ("SOL", "MON", "USDC", etc.)
+        required_sol: Backward compat alias for required
+        available_sol: Backward compat alias for available
     """
-    
-    def __init__(self, required_sol: float, available_sol: float, network: str = "devnet"):
-        if network == "devnet":
+
+    def __init__(self, required: float = None, available: float = None,
+                 network: str = "devnet", asset: str = "SOL",
+                 # Backward compat kwargs (old API used required_sol/available_sol)
+                 required_sol: float = None, available_sol: float = None):
+        # Support old kwarg names
+        if required is None and required_sol is not None:
+            required = required_sol
+        if available is None and available_sol is not None:
+            available = available_sol
+        if required is None:
+            required = 0.0
+        if available is None:
+            available = 0.0
+        if "devnet" in network and asset == "SOL":
             recovery = "Get devnet SOL with: solana airdrop 2 --url devnet"
+        elif "testnet" in network:
+            recovery = f"Get testnet {asset} from a faucet"
         else:
-            recovery = "Transfer SOL to your wallet"
-        
+            recovery = f"Transfer {asset} to your wallet"
+
         message = (
-            f"Insufficient funds: need {required_sol} SOL, have {available_sol} SOL. "
+            f"Insufficient funds: need {required} {asset}, have {available} {asset}. "
             f"{recovery}"
         )
         super().__init__(
             message,
             details={
-                "required_sol": required_sol,
-                "available_sol": available_sol,
-                "network": network
+                "required": required,
+                "available": available,
+                "required_sol": required,
+                "available_sol": available,
+                "network": network,
+                "asset": asset,
             }
         )
-        self.required_sol = required_sol
-        self.available_sol = available_sol
+        self.required = required
+        self.available = available
         self.network = network
+        self.asset = asset
+        # Backward compat aliases
+        self.required_sol = required
+        self.available_sol = available
         self.retryable = False
 
 
