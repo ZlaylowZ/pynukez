@@ -616,8 +616,8 @@ class Nukez:
         
         response = self.http.post(
             "/v1/storage/signed_provision",
-            json=body,
-            headers=envelope.headers
+            headers=envelope.headers,
+            data=envelope.canonical_body.encode("utf-8"),
         )
         
         space = response.get("space", response)
@@ -679,8 +679,8 @@ class Nukez:
         
         response = self.http.post(
             f"/v1/lockers/{locker_id}/files",
-            json=body,
-            headers=envelope.headers
+            headers=envelope.headers,
+            data=envelope.canonical_body.encode("utf-8"),
         )
         
         urls = FileUrls(
@@ -699,6 +699,17 @@ class Nukez:
             return explicit
         guessed = mimetypes.guess_type(filename)[0]
         return guessed or "application/octet-stream"
+
+    @staticmethod
+    def _sanitize_filename(name: str) -> str:
+        """Sanitize filename for gateway: replace spaces and disallowed chars."""
+        import re
+        s = name.replace(" ", "_")
+        s = s.lstrip(".")
+        s = re.sub(r"[^a-zA-Z0-9._/\-]", "_", s)
+        if s and not re.match(r"[a-zA-Z0-9_]", s[0]):
+            s = "_" + s
+        return s or "file"
 
     def create_files_batch(
         self,
@@ -752,8 +763,8 @@ class Nukez:
 
         return self.http.post(
             f"/v1/lockers/{locker_id}/files/batch",
-            json=body,
             headers=envelope.headers,
+            data=envelope.canonical_body.encode("utf-8"),
         )
 
     def _normalize_path_sources(
@@ -800,7 +811,9 @@ class Nukez:
             if not p.is_file():
                 raise NukezError(f"Expected file path, got non-file: {p}")
 
-            filename = str(spec.get("filename") or p.name).strip()
+            filename = self._sanitize_filename(
+                str(spec.get("filename") or p.name).strip()
+            )
             if not filename:
                 raise NukezError(f"Source {idx} produced empty filename")
 
@@ -1300,7 +1313,7 @@ class Nukez:
             body=body,
         )
 
-        return self.http.post(path, json=body, headers=envelope.headers)
+        return self.http.post(path, headers=envelope.headers, data=envelope.canonical_body.encode("utf-8"))
 
     def sandbox_append_ingest_part(
         self,
@@ -1346,7 +1359,7 @@ class Nukez:
             ops=["locker:write"],
             body=body,
         )
-        return self.http.post(path, json=body, headers=envelope.headers)
+        return self.http.post(path, headers=envelope.headers, data=envelope.canonical_body.encode("utf-8"))
 
     def sandbox_complete_ingest_job(
         self,
@@ -1376,7 +1389,7 @@ class Nukez:
             ops=["locker:write"],
             body=body,
         )
-        return self.http.post(path, json=body, headers=envelope.headers)
+        return self.http.post(path, headers=envelope.headers, data=envelope.canonical_body.encode("utf-8"))
 
     def sandbox_upload_bytes(
         self,
@@ -3070,8 +3083,8 @@ class Nukez:
 
         return self.http.post(
             f"/v1/lockers/{locker_id}/files/urls",
-            json=body,
             headers=envelope.headers,
+            data=envelope.canonical_body.encode("utf-8"),
         )
 
 
