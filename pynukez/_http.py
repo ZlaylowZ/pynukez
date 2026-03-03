@@ -317,11 +317,11 @@ class HTTPClient:
             raise NukezError(f"Request timed out after {self.timeout}s: POST {path}")
         
         except requests.RequestException as e:
-            raise NukezError(f"Request failed: GET {path}: {e}")
-        
+            raise NukezError(f"Request failed: POST {path}: {e}")
+
         if response.status_code >= 400:
             self._handle_error_response(response)
-        
+
         return self._parse_json_response(response, "POST", path)
     
     def delete(
@@ -352,11 +352,11 @@ class HTTPClient:
             raise NukezError(f"Request timed out after {self.timeout}s: DELETE {path}")
         
         except requests.RequestException as e:
-            raise NukezError(f"Request failed: GET {path}: {e}")
-        
+            raise NukezError(f"Request failed: DELETE {path}: {e}")
+
         if response.status_code >= 400:
             self._handle_error_response(response)
-        
+
         return self._parse_json_response(response, "DELETE", path)
     
     def put(
@@ -393,9 +393,9 @@ class HTTPClient:
             raise NukezError(f"Request timed out after {self.timeout}s: PUT {path}")
         
         except requests.RequestException as e:
-            raise NukezError(f"Request failed: GET {path}: {e}")
-        
+            raise NukezError(f"Request failed: PUT {path}: {e}")
+
         if response.status_code >= 400:
             self._handle_error_response(response)
-        
+
         return self._parse_json_response(response, "PUT", path)
