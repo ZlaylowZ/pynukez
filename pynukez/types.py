@@ -211,6 +211,9 @@ class FileInfo:
     """File information from list_files()."""
     filename: str
     content_type: str
+    size_bytes: int = 0
+    content_hash: Optional[str] = None
+    provider_ref: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     object_key: Optional[str] = None

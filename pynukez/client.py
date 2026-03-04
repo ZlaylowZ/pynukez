@@ -1704,6 +1704,9 @@ class Nukez:
             FileInfo(
                 filename=f["filename"],
                 content_type=f.get("content_type", "application/octet-stream"),
+                size_bytes=f.get("size_bytes", 0),
+                content_hash=f.get("content_hash"),
+                provider_ref=f.get("provider_ref"),
                 created_at=f.get("created_at"),
                 updated_at=f.get("updated_at"),
                 object_key=f.get("object_key")
