@@ -586,24 +586,28 @@ class Nukez:
     # =========================================================================
     
     def provision_locker(
-        self, 
-        receipt_id: str, 
-        tags: Optional[List[str]] = None
+        self,
+        receipt_id: str,
+        tags: Optional[List[str]] = None,
+        operator_pubkey: Optional[str] = None,
     ) -> NukezManifest:
         """
         Create storage locker namespace for files.
-        
+
         Args:
             receipt_id: Receipt ID from confirm_storage()
             tags: Optional tags for the locker
-            
+            operator_pubkey: Optional Ed25519 base58 pubkey to authorize as operator
+
         Returns:
             NukezManifest with locker details
         """
         keypair = self._require_keypair("provision_locker")
-        
+
         locker_id = compute_locker_id(receipt_id)
         body = {"receipt_id": receipt_id, "tags": tags or []}
+        if operator_pubkey:
+            body["operator_pubkey"] = operator_pubkey
         
         envelope = build_signed_envelope(
             keypair=keypair,

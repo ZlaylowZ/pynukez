@@ -231,7 +231,8 @@ def build_signed_envelope(
         "ops": ops,                          # Required operations
         "method": method.upper(),
         "path": path,
-        "body_sha256": body_sha256           # NOT "body_hash"
+        "body_sha256": body_sha256,          # NOT "body_hash"
+        "signer": keypair.pubkey_b58,        # Operator delegation (ADR-3)
     }
     
     # Canonicalize envelope for signing - MUST use exact same pattern
