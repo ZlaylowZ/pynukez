@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pynukez"
-version = "3.1.0"
+version = "3.2.0"
 description = "Nukez SDK — agent-native storage with cryptographic verification"
 readme = "README.md"
 license = {text = "MIT"}
@@ -40,7 +40,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "requests>=2.28.0",
+    "httpx>=0.24.0",
     "pynacl>=1.5.0",
     "base58>=2.1.0",
 ]
@@ -112,6 +112,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+asyncio_mode = "auto"
 markers = [
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",

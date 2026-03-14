@@ -18,7 +18,7 @@ import os
 import threading
 import time
 import uuid
-import requests as raw_requests
+import httpx as _httpx
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Any, Callable
 from dataclasses import dataclass
@@ -51,6 +51,33 @@ from .auth import Keypair, build_signed_envelope, compute_locker_id
 from .errors import NukezError, PaymentRequiredError, TransactionNotFoundError
 from .hardening import sanitize_upload_data, validate_signed_url
 from ._http import HTTPClient
+from ._helpers import (
+    UPLOAD_STRING_MAX_BYTES as UPLOAD_STRING_MAX_BYTES,
+    _SANDBOX_PATH_BLOCKED_MARKERS as _SANDBOX_PATH_BLOCKED_MARKERS,
+    _infer_content_type,
+    _sanitize_filename,
+    _normalize_expected_sha256,
+    _is_sandbox_path_unavailable_error,
+    _normalize_viewer_base_url,
+    _viewer_button_ui,
+    _viewer_renderer_contract,
+    _viewer_container_contract,
+    make_text_renderable,
+    make_json_renderable,
+    make_pdf_renderable,
+    make_image_renderable,
+    make_binary_renderable,
+    make_header_block,
+    make_stats_block,
+    make_links_block,
+    make_table_block,
+    make_kv_block,
+    make_status_block,
+    make_proofs_block,
+    make_json_block,
+    make_file_meta_block,
+    make_file_preview_block,
+)
 
 # Lazy import for optional Solana support
 SolanaPayment = None
@@ -60,21 +87,10 @@ VIEWER_RENDERER_CONTRACT_VERSION = "1.0"
 VIEWER_RENDERER_VARIANT = "nukez-neon"
 VIEWER_CONTAINER_CONTRACT_NAME = "nukez.viewer_container"
 VIEWER_CONTAINER_CONTRACT_VERSION = "1.0.0"
-UPLOAD_STRING_MAX_BYTES = int(os.getenv("PYNUKEZ_UPLOAD_STRING_MAX_BYTES", "262144"))
 SANDBOX_INGEST_DEFAULT_PART_BYTES = int(os.getenv("PYNUKEZ_SANDBOX_INGEST_PART_BYTES", "196608"))
 SANDBOX_INGEST_MAX_PART_BYTES = 512 * 1024
 SANDBOX_INGEST_MIN_PART_BYTES = 4 * 1024
 SANDBOX_INGEST_EXECUTION_MODE = os.getenv("PYNUKEZ_SANDBOX_EXECUTION_MODE", "sandbox")
-
-_SANDBOX_PATH_BLOCKED_MARKERS = (
-    "file arg rewrite paths are required",
-    "proxied mounts are present",
-    "proxied mount",
-    "path rewrite",
-    "sandbox_path_unavailable",
-    "/mnt/data",
-    "/mnt/user-data/uploads",
-)
 
 def _get_solana_payment():
     """Lazy import SolanaPayment to avoid requiring solana libs for non-payment ops."""
@@ -157,11 +173,26 @@ class Nukez:
         self.rpc_url = rpc_url
         self.timeout = timeout or 120
         self.http = HTTPClient(base_url, timeout=self.timeout)
+        self._raw_client = _httpx.Client(timeout=60, follow_redirects=True)
 
         # Optional keypair for signing operations
         self.keypair: Optional[Keypair] = None
         if keypair_path:
             self.keypair = Keypair(keypair_path)
+
+        # Fail-fast: if caller wants EVM payments, verify web3 is available now
+        # rather than deferring the error to the first evm_transfer() call.
+        if evm_private_key_path:
+            try:
+                from .evm_payment import HAS_WEB3
+            except ImportError:
+                HAS_WEB3 = False
+            if not HAS_WEB3:
+                raise ImportError(
+                    "web3 libraries required for EVM payments "
+                    "(evm_private_key_path was provided). "
+                    "Install with: pip install pynukez[evm]"
+                )
 
         # Lazy-initialized payment handlers
         self._payment = None
@@ -171,6 +202,17 @@ class Nukez:
         self._evm_payment = None
         self._upload_jobs: Dict[str, Dict[str, Any]] = {}
         self._upload_jobs_lock = threading.Lock()
+
+    def close(self):
+        """Close underlying HTTP clients."""
+        self.http.close()
+        self._raw_client.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
 
     def _require_keypair(self, operation: str) -> Keypair:
         """Ensure keypair is available, with helpful error message."""
@@ -495,11 +537,12 @@ class Nukez:
         for attempt in range(max_retries):
             try:
                 # Make raw request - don't use self.http which raises PaymentRequiredError
-                resp = raw_requests.post(
-                    url, 
-                    json=payload, 
-                    headers=headers, 
-                    timeout=self.timeout
+                resp = _httpx.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=self.timeout,
+                    follow_redirects=True,
                 )
                 
                 # Success!
@@ -569,7 +612,7 @@ class Nukez:
                 # Other error status
                 resp.raise_for_status()
                 
-            except raw_requests.RequestException as e:
+            except _httpx.HTTPError as e:
                 last_error = NukezError(f"Request failed: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(initial_delay * (2 ** attempt))
@@ -696,24 +739,8 @@ class Nukez:
         )
         return urls
 
-    @staticmethod
-    def _infer_content_type(filename: str, explicit: Optional[str] = None) -> str:
-        """Infer MIME type from filename when explicit value is not provided."""
-        if explicit:
-            return explicit
-        guessed = mimetypes.guess_type(filename)[0]
-        return guessed or "application/octet-stream"
-
-    @staticmethod
-    def _sanitize_filename(name: str) -> str:
-        """Sanitize filename for gateway: replace spaces and disallowed chars."""
-        import re
-        s = name.replace(" ", "_")
-        s = s.lstrip(".")
-        s = re.sub(r"[^a-zA-Z0-9._/\-]", "_", s)
-        if s and not re.match(r"[a-zA-Z0-9_]", s[0]):
-            s = "_" + s
-        return s or "file"
+    _infer_content_type = staticmethod(_infer_content_type)
+    _sanitize_filename = staticmethod(_sanitize_filename)
 
     def create_files_batch(
         self,
@@ -1229,29 +1256,8 @@ class Nukez:
             "jobs": [dict(j) for j in jobs],
         }
 
-    @staticmethod
-    def _normalize_expected_sha256(value: Optional[str]) -> Optional[str]:
-        raw = (value or "").strip().lower()
-        if not raw:
-            return None
-        if raw.startswith("sha256:"):
-            raw = raw[7:]
-        if len(raw) != 64 or any(c not in "0123456789abcdef" for c in raw):
-            raise NukezError(
-                "expected_sha256 must be 64 hex chars (optionally prefixed with sha256:)"
-            )
-        return f"sha256:{raw}"
-
-    def _is_sandbox_path_unavailable_error(self, exc: Exception) -> bool:
-        message = str(exc).lower()
-        details_text = ""
-        details = getattr(exc, "details", None)
-        if details:
-            try:
-                details_text = json.dumps(details, sort_keys=True).lower()
-            except Exception:
-                details_text = str(details).lower()
-        return any(marker in message or marker in details_text for marker in _SANDBOX_PATH_BLOCKED_MARKERS)
+    _normalize_expected_sha256 = staticmethod(_normalize_expected_sha256)
+    _is_sandbox_path_unavailable_error = staticmethod(_is_sandbox_path_unavailable_error)
 
     def sandbox_create_ingest_job(
         self,
@@ -1558,30 +1564,28 @@ class Nukez:
     def upload_bytes(self, upload_url: str, data: bytes, content_type: str = None) -> UploadResult:
         """
         Upload data to signed URL.
-        
+
         Args:
             upload_url: URL from create_file() or get_file_urls()
             data: Bytes to upload
-            content_type: Optional content type override
-            
+            content_type: Optional content type override (default: application/octet-stream)
+
         Returns:
             UploadResult with upload confirmation
-            
+
         Note:
             For agent/tool-calling use, prefer upload_string() which accepts
             a string and handles common formatting issues automatically.
         """
-        headers = {}
-        if content_type:
-            headers["Content-Type"] = content_type
-        
-        response = raw_requests.put(upload_url, data=data, headers=headers, timeout=60)
+        headers = {"Content-Type": content_type or "application/octet-stream"}
+
+        response = self._raw_client.put(upload_url, content=data, headers=headers)
         response.raise_for_status()
-        
+
         return UploadResult(
             upload_url=upload_url,
             size_bytes=len(data),
-            content_type=content_type,
+            content_type=content_type or "application/octet-stream",
             uploaded_at=int(time.time())
         )
     
@@ -1644,38 +1648,101 @@ class Nukez:
 
         return self.upload_bytes(upload_url, cleaned.encode("utf-8"), content_type)
     
-    def download_bytes(self, download_url: str) -> bytes:
+    def download_bytes(
+        self,
+        download_url: str,
+        max_retries: int = 3,
+        initial_delay: float = 2.0,
+    ) -> bytes:
         """
         Download data from signed URL.
-        
+
+        Includes retry with exponential backoff on HTTP 404.  Content-addressed
+        storage providers (Arweave, Filecoin) may return 404 for seconds after
+        upload while data propagates through their indexing layers.  The gateway
+        also retries server-side (P0), but this provides a defensive fallback
+        when the SDK hits provider URLs directly.
+
         Args:
             download_url: URL from create_file() or get_file_urls()
-            
+            max_retries: Retry attempts on 404 (default: 3, set 0 to disable)
+            initial_delay: Initial backoff in seconds, doubles each retry (default: 2.0)
+
         Returns:
             Downloaded bytes
-            
+
         Raises:
-            NukezError: If URL is malformed or download fails.
+            NukezError: If URL is malformed, download fails after retries, or
+                a non-retryable HTTP error occurs.
                 Error message includes recovery steps.
         """
         # Validate URL before making the request
         url_err = validate_signed_url(download_url, "download_url")
         if url_err:
             raise NukezError(url_err)
-        
-        try:
-            response = raw_requests.get(download_url, timeout=60)
-            response.raise_for_status()
-        except raw_requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response is not None else None
-            if status in (400, 403):
-                raise NukezError(
-                    f"Download failed (HTTP {status}). The signed URL may be expired or malformed. "
-                    f"Call get_file_urls(receipt_id=..., filename=...) or list_files(receipt_id=...) "
-                    f"to get fresh download URLs."
-                ) from e
-            raise
-        return response.content
+
+        max_attempts = 1 + max_retries
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                delay = initial_delay * (2 ** (attempt - 1))
+                print(
+                    f"[pynukez] Download returned 404, retrying in {delay}s "
+                    f"(attempt {attempt}/{max_retries})"
+                )
+                time.sleep(delay)
+
+            try:
+                response = self._raw_client.get(download_url)
+                if response.status_code == 404 and attempt < max_attempts - 1:
+                    continue
+                response.raise_for_status()
+                return response.content
+            except _httpx.HTTPStatusError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status == 404:
+                    # Extract structured error from gateway proxy responses.
+                    # The gateway returns CONTENT_PROPAGATION_PENDING for
+                    # content-addressed providers (Arweave/Filecoin) vs
+                    # generic FILE_NOT_FOUND for key-addressed providers.
+                    error_details = {"retryable": True, "status": 404}
+                    message = (
+                        "Download failed (HTTP 404). The file may still be propagating on a "
+                        "content-addressed provider (Arweave/Filecoin). "
+                        "Call confirm_file(receipt_id, filename) to verify availability, "
+                        "then retry download_bytes(). If the file truly does not exist, "
+                        "call list_files(receipt_id) to check."
+                    )
+                    try:
+                        body = e.response.json()
+                        if body.get("error_code") == "CONTENT_PROPAGATION_PENDING":
+                            provider = body.get("details", {}).get("provider", "unknown")
+                            suggested = body.get("details", {}).get("suggested_delay", 15)
+                            message = (
+                                f"Download failed: content-addressed storage ({provider}) "
+                                f"has not finished propagating. The upload was confirmed but "
+                                f"data is not yet downloadable. Wait {suggested}s and retry "
+                                f"download_bytes(), or call confirm_file(receipt_id, filename) "
+                                f"to verify availability."
+                            )
+                            error_details.update(body.get("details", {}))
+                            error_details["error_code"] = "CONTENT_PROPAGATION_PENDING"
+                    except Exception:
+                        pass  # Non-JSON response (direct storage URL) — use generic message
+                    raise NukezError(message, details=error_details) from e
+                if status in (400, 403):
+                    raise NukezError(
+                        f"Download failed (HTTP {status}). The signed URL may be expired or malformed. "
+                        f"Call get_file_urls(receipt_id=..., filename=...) or list_files(receipt_id=...) "
+                        f"to get fresh download URLs."
+                    ) from e
+                raise
+
+        # Should not reach here, but guard against it
+        raise NukezError(
+            "Download failed (HTTP 404) after retries. The file may still be propagating. "
+            "Call confirm_file(receipt_id, filename) to verify availability, then retry.",
+            details={"retryable": True, "status": 404},
+        )
     
     def list_files(self, receipt_id: str) -> List[FileInfo]:
         """
@@ -1763,44 +1830,10 @@ class Nukez:
     # VIEWER PORTAL HANDOFF (Agent -> Human)
     # =========================================================================
 
-    @staticmethod
-    def _normalize_viewer_base_url(viewer_base_url: str) -> str:
-        """Normalize viewer host for URL construction."""
-        base = (viewer_base_url or "https://nukez.xyz").strip()
-        if not base:
-            base = "https://nukez.xyz"
-        return base.rstrip("/")
-
-    @staticmethod
-    def _viewer_button_ui(
-        label: str,
-        url: str,
-        variant: str = VIEWER_RENDERER_VARIANT,
-    ) -> Dict[str, str]:
-        """UI metadata for MCP/tool renderers."""
-        return {
-            "kind": "button",
-            "label": label,
-            "href": url,
-            "variant": variant,
-            "target": "_blank",
-        }
-
-    @staticmethod
-    def _viewer_renderer_contract() -> Dict[str, str]:
-        """Stable renderer contract descriptor for MCP/frontends."""
-        return {
-            "name": VIEWER_RENDERER_CONTRACT_NAME,
-            "version": VIEWER_RENDERER_CONTRACT_VERSION,
-        }
-
-    @staticmethod
-    def _viewer_container_contract() -> Dict[str, str]:
-        """Stable container contract descriptor for generic viewer payloads."""
-        return {
-            "name": VIEWER_CONTAINER_CONTRACT_NAME,
-            "version": VIEWER_CONTAINER_CONTRACT_VERSION,
-        }
+    _normalize_viewer_base_url = staticmethod(_normalize_viewer_base_url)
+    _viewer_button_ui = staticmethod(_viewer_button_ui)
+    _viewer_renderer_contract = staticmethod(_viewer_renderer_contract)
+    _viewer_container_contract = staticmethod(_viewer_container_contract)
 
     def get_viewer_container_url(
         self,
@@ -1933,244 +1966,21 @@ class Nukez:
             ui=self._viewer_button_ui(button_label, viewer_url),
         )
 
-    @staticmethod
-    def make_text_renderable(
-        content: str,
-        title: str = "Text",
-        description: str = "",
-        content_type: str = "text/plain",
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Build a text renderable object for viewer_container payloads."""
-        payload: Dict[str, Any] = {
-            "type": "text",
-            "title": title,
-            "content": content,
-            "content_type": content_type,
-        }
-        if description:
-            payload["description"] = description
-        if meta:
-            payload["meta"] = meta
-        return payload
-
-    @staticmethod
-    def make_json_renderable(
-        data: Any,
-        title: str = "JSON",
-        description: str = "",
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Build a JSON renderable object for viewer_container payloads."""
-        payload: Dict[str, Any] = {
-            "type": "json",
-            "title": title,
-            "data": data,
-            "content_type": "application/json",
-        }
-        if description:
-            payload["description"] = description
-        if meta:
-            payload["meta"] = meta
-        return payload
-
-    @staticmethod
-    def make_pdf_renderable(
-        url: str,
-        title: str = "PDF",
-        description: str = "",
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Build a PDF renderable object for viewer_container payloads."""
-        payload: Dict[str, Any] = {
-            "type": "pdf",
-            "title": title,
-            "url": url,
-            "content_type": "application/pdf",
-        }
-        if description:
-            payload["description"] = description
-        if meta:
-            payload["meta"] = meta
-        return payload
-
-    @staticmethod
-    def make_image_renderable(
-        url: str,
-        title: str = "Image",
-        description: str = "",
-        alt: str = "",
-        content_type: str = "image/*",
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Build an image renderable object for viewer_container payloads."""
-        payload: Dict[str, Any] = {
-            "type": "image",
-            "title": title,
-            "url": url,
-            "content_type": content_type,
-        }
-        if description:
-            payload["description"] = description
-        if alt:
-            payload["alt"] = alt
-        if meta:
-            payload["meta"] = meta
-        return payload
-
-    @staticmethod
-    def make_binary_renderable(
-        hex_preview: str = "",
-        title: str = "Binary",
-        description: str = "",
-        size_bytes: Optional[int] = None,
-        content_type: str = "application/octet-stream",
-        base64_data: str = "",
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Build a binary renderable object for viewer_container payloads."""
-        payload: Dict[str, Any] = {
-            "type": "binary",
-            "title": title,
-            "content_type": content_type,
-        }
-        if description:
-            payload["description"] = description
-        if hex_preview:
-            payload["hex_preview"] = hex_preview
-        if base64_data:
-            payload["base64"] = base64_data
-        if size_bytes is not None:
-            payload["size_bytes"] = size_bytes
-        if meta:
-            payload["meta"] = meta
-        return payload
-
-    @staticmethod
-    def make_header_block(
-        title: str,
-        subtitle: str = "",
-        description: str = "",
-        badge: str = "",
-    ) -> Dict[str, Any]:
-        """Build a generic header block for viewer_container blocks."""
-        block: Dict[str, Any] = {"type": "header", "title": title}
-        if subtitle:
-            block["subtitle"] = subtitle
-        if description:
-            block["description"] = description
-        if badge:
-            block["badge"] = badge
-        return block
-
-    @staticmethod
-    def make_stats_block(items: List[Dict[str, Any]], title: str = "Stats") -> Dict[str, Any]:
-        """Build a stats block."""
-        return {"type": "stats", "title": title, "items": items}
-
-    @staticmethod
-    def make_links_block(items: List[Dict[str, Any]], title: str = "Links") -> Dict[str, Any]:
-        """Build a links block."""
-        return {"type": "links", "title": title, "items": items}
-
-    @staticmethod
-    def make_table_block(
-        columns: List[Dict[str, Any]],
-        rows: List[Dict[str, Any]],
-        title: str = "Table",
-    ) -> Dict[str, Any]:
-        """Build a table block."""
-        return {
-            "type": "table",
-            "title": title,
-            "columns": columns,
-            "rows": rows,
-        }
-
-    @staticmethod
-    def make_kv_block(items: List[Dict[str, Any]], title: str = "Details") -> Dict[str, Any]:
-        """Build a key-value block."""
-        return {"type": "kv", "title": title, "items": items}
-
-    @staticmethod
-    def make_status_block(status: str, label: str = "Status", detail: str = "") -> Dict[str, Any]:
-        """Build a status block."""
-        block: Dict[str, Any] = {"type": "status", "status": status, "label": label}
-        if detail:
-            block["detail"] = detail
-        return block
-
-    @staticmethod
-    def make_proofs_block(items: List[Dict[str, Any]], title: str = "Proofs") -> Dict[str, Any]:
-        """Build a proofs block."""
-        return {"type": "proofs", "title": title, "items": items}
-
-    @staticmethod
-    def make_json_block(data: Any, title: str = "Raw JSON") -> Dict[str, Any]:
-        """Build a JSON block."""
-        return {"type": "json", "title": title, "data": data}
-
-    @staticmethod
-    def make_file_meta_block(
-        filename: str,
-        content_type: str = "",
-        size_bytes: Optional[int] = None,
-        updated_at: Optional[str] = None,
-        sha256: str = "",
-        extra: Optional[Dict[str, Any]] = None,
-        title: str = "File Metadata",
-    ) -> Dict[str, Any]:
-        """Build a file metadata block."""
-        items: List[Dict[str, Any]] = [{"key": "Filename", "value": filename}]
-        if content_type:
-            items.append({"key": "Content-Type", "value": content_type})
-        if size_bytes is not None:
-            items.append({"key": "Size Bytes", "value": size_bytes})
-        if updated_at:
-            items.append({"key": "Updated At", "value": updated_at})
-        if sha256:
-            items.append({"key": "SHA-256", "value": sha256})
-        if extra:
-            for key, value in extra.items():
-                items.append({"key": str(key), "value": value})
-        return {"type": "file_meta", "title": title, "items": items}
-
-    @staticmethod
-    def make_file_preview_block(
-        filename: str,
-        content_type: str = "",
-        url: str = "",
-        text_content: str = "",
-        json_data: Any = None,
-        hex_preview: str = "",
-        base64_data: str = "",
-        size_bytes: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """
-        Build a file preview block.
-
-        The frontend resolves rendering mode from filename/content_type and
-        available fields so callers do not manage mime-specific rendering logic.
-        """
-        block: Dict[str, Any] = {
-            "type": "file_preview",
-            "filename": filename,
-        }
-        if content_type:
-            block["content_type"] = content_type
-        if url:
-            block["url"] = url
-        if text_content:
-            block["text_content"] = text_content
-        if json_data is not None:
-            block["data"] = json_data
-        if hex_preview:
-            block["hex_preview"] = hex_preview
-        if base64_data:
-            block["base64"] = base64_data
-        if size_bytes is not None:
-            block["size_bytes"] = size_bytes
-        return block
+    make_text_renderable = staticmethod(make_text_renderable)
+    make_json_renderable = staticmethod(make_json_renderable)
+    make_pdf_renderable = staticmethod(make_pdf_renderable)
+    make_image_renderable = staticmethod(make_image_renderable)
+    make_binary_renderable = staticmethod(make_binary_renderable)
+    make_header_block = staticmethod(make_header_block)
+    make_stats_block = staticmethod(make_stats_block)
+    make_links_block = staticmethod(make_links_block)
+    make_table_block = staticmethod(make_table_block)
+    make_kv_block = staticmethod(make_kv_block)
+    make_status_block = staticmethod(make_status_block)
+    make_proofs_block = staticmethod(make_proofs_block)
+    make_json_block = staticmethod(make_json_block)
+    make_file_meta_block = staticmethod(make_file_meta_block)
+    make_file_preview_block = staticmethod(make_file_preview_block)
 
     def get_locker_view_container(
         self,
@@ -3201,132 +3011,6 @@ class Nukez:
             errors=errors,
             files=files_out,
         )
-    
-    @staticmethod
-    def make_header_block(
-        title: str,
-        subtitle: str = "",
-        description: str = "",
-        badge: str = "",
-    ) -> Dict[str, Any]:
-        """Build a header block for viewer_container blocks."""
-        block: Dict[str, Any] = {"type": "header", "title": title}
-        if subtitle:
-            block["subtitle"] = subtitle
-        if description:
-            block["description"] = description
-        if badge:
-            block["badge"] = badge
-        return block
-
-    @staticmethod
-    def make_stats_block(items: List[Dict[str, Any]], title: str = "Stats") -> Dict[str, Any]:
-        """Build a stats block."""
-        return {"type": "stats", "title": title, "items": items}
-
-    @staticmethod
-    def make_links_block(items: List[Dict[str, Any]], title: str = "Links") -> Dict[str, Any]:
-        """Build a links block."""
-        return {"type": "links", "title": title, "items": items}
-
-    @staticmethod
-    def make_table_block(
-        columns: List[Dict[str, Any]],
-        rows: List[Dict[str, Any]],
-        title: str = "Table",
-    ) -> Dict[str, Any]:
-        """Build a table block."""
-        return {
-            "type": "table",
-            "title": title,
-            "columns": columns,
-            "rows": rows,
-        }
-
-    @staticmethod
-    def make_kv_block(items: List[Dict[str, Any]], title: str = "Details") -> Dict[str, Any]:
-        """Build a key-value block."""
-        return {"type": "kv", "title": title, "items": items}
-
-    @staticmethod
-    def make_status_block(status: str, label: str = "Status", detail: str = "") -> Dict[str, Any]:
-        """Build a status block."""
-        block: Dict[str, Any] = {"type": "status", "status": status, "label": label}
-        if detail:
-            block["detail"] = detail
-        return block
-
-    @staticmethod
-    def make_proofs_block(items: List[Dict[str, Any]], title: str = "Proofs") -> Dict[str, Any]:
-        """Build a proofs block."""
-        return {"type": "proofs", "title": title, "items": items}
-
-    @staticmethod
-    def make_json_block(data: Any, title: str = "Raw JSON") -> Dict[str, Any]:
-        """Build a JSON block."""
-        return {"type": "json", "title": title, "data": data}
-
-    @staticmethod
-    def make_file_meta_block(
-        filename: str,
-        content_type: str = "",
-        size_bytes: Optional[int] = None,
-        updated_at: Optional[str] = None,
-        sha256: str = "",
-        extra: Optional[Dict[str, Any]] = None,
-        title: str = "File Metadata",
-    ) -> Dict[str, Any]:
-        """Build a file metadata block."""
-        items: List[Dict[str, Any]] = [{"key": "Filename", "value": filename}]
-        if content_type:
-            items.append({"key": "Content-Type", "value": content_type})
-        if size_bytes is not None:
-            items.append({"key": "Size Bytes", "value": size_bytes})
-        if updated_at:
-            items.append({"key": "Updated At", "value": updated_at})
-        if sha256:
-            items.append({"key": "SHA-256", "value": sha256})
-        if extra:
-            for key, value in extra.items():
-                items.append({"key": str(key), "value": value})
-        return {"type": "file_meta", "title": title, "items": items}
-
-    @staticmethod
-    def make_file_preview_block(
-        filename: str,
-        content_type: str = "",
-        url: str = "",
-        text_content: str = "",
-        json_data: Any = None,
-        hex_preview: str = "",
-        base64_data: str = "",
-        size_bytes: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """
-        Build a file preview block.
-
-        The frontend resolves rendering mode from filename/content_type and
-        available fields so callers do not manage mime-specific rendering logic.
-        """
-        block: Dict[str, Any] = {
-            "type": "file_preview",
-            "filename": filename,
-        }
-        if content_type:
-            block["content_type"] = content_type
-        if url:
-            block["url"] = url
-        if text_content:
-            block["text_content"] = text_content
-        if json_data is not None:
-            block["data"] = json_data
-        if hex_preview:
-            block["hex_preview"] = hex_preview
-        if base64_data:
-            block["base64"] = base64_data
-        if size_bytes is not None:
-            block["size_bytes"] = size_bytes
-        return block
 
 
 

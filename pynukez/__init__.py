@@ -7,38 +7,26 @@ This SDK is designed for autonomous AI agents that need persistent storage with
 cryptographic receipts. Every function is tool-shaped and stateless - perfect
 for LLM tool-calling patterns.
 
-Quick Start:
+Quick Start (sync):
     from pynukez import Nukez
 
-    client = Nukez(
-        keypair_path=KEYPAIR_PATH,
-        network=NETWORK,
-        base_url=BASE_URL,
-        rpc_url=RPC_URL,
-    )
-
-    # Request storage (returns payment instructions)
+    client = Nukez(keypair_path=KEYPAIR_PATH)
     request = client.request_storage(units=1)
-
-    # Execute payment
     transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
-
-    # Confirm payment and get receipt
     receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
 
-    # Provision storage and create files
-    manifest = client.provision_locker(receipt.id)
-    urls = client.create_file(receipt.id, "data.txt")
+Quick Start (async):
+    from pynukez import AsyncNukez
 
-    # Upload and download
-    client.upload_bytes(urls.upload_url, b"Hello!")
-    data = client.download_bytes(urls.download_url)
-
-For autonomous agents, call get_agent_instructions() for structured guidance.
+    async with AsyncNukez(keypair_path=KEYPAIR_PATH) as client:
+        request = await client.request_storage(units=1)
+        transfer = await client.solana_transfer(request.pay_to_address, request.amount_sol)
+        receipt = await client.confirm_storage(request.pay_req_id, transfer.signature)
 """
 
-# Main client class
+# Client classes
 from .client import Nukez
+from ._async_client import AsyncNukez
 
 # Data models and types
 from .types import (
@@ -112,7 +100,7 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "3.1.0"
+__version__ = "3.2.0"
 
 __all__ = [
     # Main client

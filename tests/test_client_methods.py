@@ -3,8 +3,9 @@
 Batch 4D: SDK client method tests — verifies method signatures and public API surface.
 """
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 from pynukez.client import Nukez
+from pynukez.errors import NukezError
 
 
 class TestClientInit:
@@ -140,3 +141,266 @@ class TestClientFileInfoExpansion:
         assert f.size_bytes == 0
         assert f.content_hash is None
         assert f.provider_ref is None
+
+
+class TestDownloadBytesRetry:
+    """Verify download_bytes retries on 404 for content-addressed propagation."""
+
+    @patch("pynukez.client.Keypair")
+    def test_download_succeeds_first_try(self, mock_kp):
+        """No retries when download succeeds immediately."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b"hello world"
+        mock_resp.raise_for_status = MagicMock()
+
+        client._raw_client = MagicMock()
+        client._raw_client.get = MagicMock(return_value=mock_resp)
+        result = client.download_bytes("https://api.nukez.xyz/f/tok123")
+
+        assert result == b"hello world"
+        assert client._raw_client.get.call_count == 1
+
+    @patch("pynukez.client.time.sleep")
+    @patch("pynukez.client.Keypair")
+    def test_download_retries_on_404_then_succeeds(self, mock_kp, mock_sleep):
+        """Download retries on 404 and succeeds on second attempt."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+
+        resp_404 = MagicMock()
+        resp_404.status_code = 404
+
+        resp_200 = MagicMock()
+        resp_200.status_code = 200
+        resp_200.content = b"propagated data"
+        resp_200.raise_for_status = MagicMock()
+
+        client._raw_client = MagicMock()
+        client._raw_client.get = MagicMock(side_effect=[resp_404, resp_200])
+        result = client.download_bytes("https://api.nukez.xyz/f/tok123")
+
+        assert result == b"propagated data"
+        assert client._raw_client.get.call_count == 2
+        mock_sleep.assert_called_once_with(2.0)
+
+    @patch("pynukez.client.time.sleep")
+    @patch("pynukez.client.Keypair")
+    def test_download_exhausts_retries_raises(self, mock_kp, mock_sleep):
+        """Download raises NukezError after all retries exhausted on 404."""
+        from httpx import HTTPStatusError
+        from unittest.mock import MagicMock as _MagicMock
+
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+
+        mock_err_resp = MagicMock()
+        mock_err_resp.status_code = 404
+        last_err = HTTPStatusError(message="error", request=_MagicMock(), response=mock_err_resp)
+
+        resp_404_ok = MagicMock()
+        resp_404_ok.status_code = 404
+
+        resp_404_final = MagicMock()
+        resp_404_final.status_code = 404
+        resp_404_final.raise_for_status.side_effect = last_err
+
+        client._raw_client = MagicMock()
+        client._raw_client.get = MagicMock(
+            side_effect=[resp_404_ok, resp_404_ok, resp_404_ok, resp_404_final]
+        )
+        with pytest.raises(NukezError, match="404"):
+            client.download_bytes("https://api.nukez.xyz/f/tok123")
+
+        # 3 retries → sleeps at 2s, 4s, 8s
+        assert mock_sleep.call_count == 3
+        mock_sleep.assert_any_call(2.0)
+        mock_sleep.assert_any_call(4.0)
+        mock_sleep.assert_any_call(8.0)
+
+    @patch("pynukez.client.Keypair")
+    def test_download_no_retry_on_403(self, mock_kp):
+        """403 (expired URL) does not trigger retry — raises immediately."""
+        from httpx import HTTPStatusError
+        from unittest.mock import MagicMock as _MagicMock
+
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_resp.raise_for_status.side_effect = HTTPStatusError(message="error", request=_MagicMock(), response=mock_resp)
+
+        client._raw_client = MagicMock()
+        client._raw_client.get = MagicMock(return_value=mock_resp)
+        with pytest.raises(NukezError, match="expired or malformed"):
+            client.download_bytes("https://api.nukez.xyz/f/tok123")
+
+        assert client._raw_client.get.call_count == 1
+
+    @patch("pynukez.client.time.sleep")
+    @patch("pynukez.client.Keypair")
+    def test_download_retry_disabled_with_zero(self, mock_kp, mock_sleep):
+        """max_retries=0 disables retry — single attempt only."""
+        from httpx import HTTPStatusError
+        from unittest.mock import MagicMock as _MagicMock
+
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.raise_for_status.side_effect = HTTPStatusError(message="error", request=_MagicMock(), response=mock_resp)
+
+        client._raw_client = MagicMock()
+        client._raw_client.get = MagicMock(return_value=mock_resp)
+        with pytest.raises(NukezError, match="404"):
+            client.download_bytes(
+                "https://api.nukez.xyz/f/tok123", max_retries=0
+            )
+
+        assert client._raw_client.get.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("pynukez.client.time.sleep")
+    @patch("pynukez.client.Keypair")
+    def test_download_exponential_backoff_timing(self, mock_kp, mock_sleep):
+        """Verify exponential backoff doubles each retry: 2s, 4s, 8s."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+
+        resp_404 = MagicMock()
+        resp_404.status_code = 404
+
+        resp_200 = MagicMock()
+        resp_200.status_code = 200
+        resp_200.content = b"ok"
+        resp_200.raise_for_status = MagicMock()
+
+        client._raw_client = MagicMock()
+        client._raw_client.get = MagicMock(
+            side_effect=[resp_404, resp_404, resp_404, resp_200]
+        )
+        result = client.download_bytes("https://api.nukez.xyz/f/tok123")
+
+        assert result == b"ok"
+        assert mock_sleep.call_args_list == [call(2.0), call(4.0), call(8.0)]
+
+    @patch("pynukez.client.time.sleep")
+    @patch("pynukez.client.Keypair")
+    def test_download_propagation_error_parsed_from_gateway(self, mock_kp, mock_sleep):
+        """Gateway CONTENT_PROPAGATION_PENDING response is parsed into NukezError details."""
+        from httpx import HTTPStatusError
+        from unittest.mock import MagicMock as _MagicMock
+
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+
+        gateway_body = {
+            "error_code": "CONTENT_PROPAGATION_PENDING",
+            "message": "File upload confirmed but data is not yet available.",
+            "details": {
+                "retryable": True,
+                "provider": "arweave",
+                "suggested_delay": 15,
+                "filename": "test.txt",
+            },
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.json.return_value = gateway_body
+        mock_resp.raise_for_status.side_effect = HTTPStatusError(message="error", request=_MagicMock(), response=mock_resp)
+
+        resp_404 = MagicMock()
+        resp_404.status_code = 404
+
+        client._raw_client = MagicMock()
+        client._raw_client.get = MagicMock(
+            side_effect=[resp_404, resp_404, resp_404, mock_resp]
+        )
+        with pytest.raises(NukezError) as exc_info:
+            client.download_bytes("https://api.nukez.xyz/f/tok123")
+
+        err = exc_info.value
+        assert "arweave" in err.message
+        assert "propagating" in err.message
+        assert err.details.get("error_code") == "CONTENT_PROPAGATION_PENDING"
+        assert err.details.get("provider") == "arweave"
+        assert err.details.get("suggested_delay") == 15
+        assert err.details.get("retryable") is True
+
+    @patch("pynukez.client.time.sleep")
+    @patch("pynukez.client.Keypair")
+    def test_download_generic_404_when_no_json_body(self, mock_kp, mock_sleep):
+        """Non-JSON 404 response falls back to generic propagation message."""
+        from httpx import HTTPStatusError
+        from unittest.mock import MagicMock as _MagicMock
+
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.json.side_effect = ValueError("No JSON")
+        mock_resp.raise_for_status.side_effect = HTTPStatusError(message="error", request=_MagicMock(), response=mock_resp)
+
+        client._raw_client = MagicMock()
+        client._raw_client.get = MagicMock(return_value=mock_resp)
+        with pytest.raises(NukezError) as exc_info:
+            client.download_bytes(
+                "https://storage.googleapis.com/signed-url", max_retries=0
+            )
+
+        err = exc_info.value
+        assert "404" in err.message
+        assert "confirm_file" in err.message
+        assert err.details.get("retryable") is True
+        # Should NOT have propagation-specific fields
+        assert "error_code" not in err.details
+
+
+class TestUploadBytesContentType:
+    """Verify upload_bytes Content-Type header behavior after requests→httpx migration."""
+
+    @patch("pynukez.client.Keypair")
+    def test_default_content_type_is_octet_stream(self, mock_kp):
+        """upload_bytes defaults to application/octet-stream, matching create_file's default.
+
+        GCS signed URLs include content-type in X-Goog-SignedHeaders.
+        The Content-Type must match what create_file signed into the URL.
+        create_file defaults to application/octet-stream, so upload_bytes must too.
+        """
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        client._raw_client = MagicMock()
+        client._raw_client.put = MagicMock(return_value=mock_resp)
+
+        client.upload_bytes("https://api.nukez.xyz/f/token", b"Hello!")
+
+        _, kwargs = client._raw_client.put.call_args
+        assert kwargs["headers"]["Content-Type"] == "application/octet-stream"
+
+    @patch("pynukez.client.Keypair")
+    def test_content_type_header_sent_when_specified(self, mock_kp):
+        """upload_bytes sends Content-Type when caller provides it."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        client._raw_client = MagicMock()
+        client._raw_client.put = MagicMock(return_value=mock_resp)
+
+        client.upload_bytes(
+            "https://api.nukez.xyz/f/token", b"Hello!", content_type="text/plain"
+        )
+
+        _, kwargs = client._raw_client.put.call_args
+        assert kwargs["headers"]["Content-Type"] == "text/plain"
+
+    @patch("pynukez.client.Keypair")
+    def test_upload_bytes_uses_raw_client(self, mock_kp):
+        """upload_bytes uses self._raw_client (persistent, follow_redirects=True)."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        client._raw_client = MagicMock()
+        client._raw_client.put = MagicMock(return_value=mock_resp)
+
+        client.upload_bytes("https://api.nukez.xyz/f/token", b"data")
+
+        client._raw_client.put.assert_called_once()

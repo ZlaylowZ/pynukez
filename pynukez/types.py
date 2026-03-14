@@ -6,7 +6,7 @@ Agents can access fields predictably: result.field_name
 """
 
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import hashlib
 
 @dataclass
@@ -32,7 +32,7 @@ class StorageRequest:
     token_decimals: Optional[int] = None  # token decimals (EVM only)
 
     # Quote lifecycle (from 402 response)
-    payment_options: Optional[List[Dict[str, Any]]] = None   # all chain/asset combos
+    payment_options: Optional[List[Dict[str, Any]]] = None   # all chain/asset combos; use parsed_options for typed access
     quote_expires_at: Optional[int] = None                    # unix timestamp
     quote_schema: Optional[str] = None                        # "dl_quote_v3"
     idempotency_key: Optional[str] = None
@@ -65,6 +65,13 @@ class StorageRequest:
                 f" ({len(self.payment_options)} payment option(s) available — "
                 f"check payment_options for alternatives.)"
             )
+
+    @property
+    def parsed_options(self) -> List["PaymentOption"]:
+        """Parse raw payment_options dicts into typed PaymentOption objects."""
+        if not self.payment_options:
+            return []
+        return [PaymentOption.from_dict(d) for d in self.payment_options]
 
 @dataclass
 class Receipt:
@@ -163,7 +170,14 @@ class PriceInfo:
     provider: str = ""                                  # which provider was priced
     mode: str = "static"                                # "static" or "override"
     cost_breakdown: Optional[Dict[str, Any]] = None     # base, attestation, egress, margin
-    payment_options: Optional[List[Dict[str, Any]]] = None
+    payment_options: Optional[List[Dict[str, Any]]] = None  # use parsed_options for typed access
+
+    @property
+    def parsed_options(self) -> List["PaymentOption"]:
+        """Parse raw payment_options dicts into typed PaymentOption objects."""
+        if not self.payment_options:
+            return []
+        return [PaymentOption.from_dict(d) for d in self.payment_options]
 
 @dataclass
 class PaymentOption:
@@ -175,6 +189,21 @@ class PaymentOption:
     treasury: str           # destination address
     decimals: int           # token decimals
     token_contract: Optional[str] = None   # ERC-20 address (EVM only)
+    oracle_rate: Optional[Dict[str, Any]] = None  # e.g. {"mon_usd": 0.42, "source": "coingecko"}
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "PaymentOption":
+        """Construct from a gateway payment_options dict, ignoring unknown keys."""
+        return cls(
+            chain=d["chain"],
+            asset=d["asset"],
+            amount=d["amount"],
+            amount_raw=d["amount_raw"],
+            treasury=d["treasury"],
+            decimals=d["decimals"],
+            token_contract=d.get("token_contract"),
+            oracle_rate=d.get("oracle_rate"),
+        )
 
 @dataclass
 class TransferResult:
@@ -332,7 +361,7 @@ class ConfirmResult:
 @dataclass
 class BatchConfirmResult:
     """Result of confirming multiple file uploads."""
-    results: list              # List[ConfirmResult]
+    results: List[ConfirmResult]
     confirmed_count: int
     failed_count: int
 
@@ -343,11 +372,11 @@ class AttestResult:
     receipt_id: str
     merkle_root: str           # sha256:... prefixed
     file_count: int
-    att_code: object           # int or None
-    status: str                # "complete" or "accepted"
-    push_ok: bool              # True if Switchboard push succeeded
-    tx_signature: object       # str or None
-    switchboard_slot: object   # int or None
+    att_code: Optional[int] = None
+    status: str = "accepted"   # "complete" or "accepted"
+    push_ok: bool = False      # True if Switchboard push succeeded
+    tx_signature: Optional[str] = None
+    switchboard_slot: Optional[int] = None
 
 
 @dataclass
@@ -357,8 +386,8 @@ class BatchUploadResult:
     failed: int
     total: int
     elapsed_sec: float
-    errors: list               # List[Tuple[str, str]] — (filename, error_message)
-    results: list              # List[UploadResult]
+    errors: List[Tuple[str, str]]    # (filename, error_message)
+    results: List[UploadResult]
 
 @dataclass
 class DownloadedFile:
@@ -376,5 +405,5 @@ class BatchDownloadResult:
     failed: int
     total: int
     elapsed_sec: float
-    errors: list
-    files: list
+    errors: List[Tuple[str, str]]    # (filename, error_message)
+    files: List[DownloadedFile]

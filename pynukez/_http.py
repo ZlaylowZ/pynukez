@@ -6,10 +6,11 @@ Handles:
 - Error response parsing
 - Conversion to agent-friendly exceptions
 
-FIXED: Better handling of 402 responses and debug logging for payment field extraction.
+Provides both sync (HTTPClient) and shared error-handling functions
+used by AsyncHTTPClient in _async_http.py.
 """
 
-import requests
+import httpx
 from typing import Dict, Any, Optional
 
 from .errors import (
@@ -22,380 +23,341 @@ from .errors import (
     RateLimitError,
 )
 
+# Standard headers shared by sync and async clients
+STANDARD_HEADERS = {
+    "User-Agent": "nukez-sdk/3.2.0",
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+}
+
+
+# ---------------------------------------------------------------------------
+# Shared error-handling functions (duck-typed: works with both
+# httpx.Response and requests.Response)
+# ---------------------------------------------------------------------------
+
+def parse_json_response(response, method: str, path: str) -> Dict[str, Any]:
+    """
+    Safely parse JSON response body with clear error messages.
+
+    Args:
+        response: HTTP response object (httpx.Response or requests.Response)
+        method: HTTP method (for error messages)
+        path: Request path (for error messages)
+
+    Returns:
+        Parsed JSON as dict, or empty dict if no content
+
+    Raises:
+        NukezError: If JSON parsing fails
+    """
+    if not response.content:
+        return {}
+
+    try:
+        return response.json()
+    except (ValueError, TypeError) as e:
+        content_preview = response.content[:200].decode('utf-8', errors='replace')
+        raise NukezError(
+            f"Invalid JSON response from {method} {path}: {e}. "
+            f"Response content: {content_preview}..."
+        )
+
+
+def parse_error_response(response) -> dict:
+    """
+    Safely parse error response body.
+
+    Args:
+        response: HTTP response object (httpx.Response or requests.Response)
+
+    Returns:
+        Parsed error dict, or empty dict on failure
+    """
+    try:
+        if response.content:
+            data = response.json()
+            return data if isinstance(data, dict) else {}
+    except (ValueError, TypeError) as e:
+        import sys
+        print(f"[nukez] WARNING: Failed to parse response JSON: {e}", file=sys.stderr)
+        print(f"[nukez] Response content: {response.content[:500]}", file=sys.stderr)
+    return {}
+
+
+def handle_error_response(response) -> None:
+    """
+    Convert HTTP error responses to appropriate Nukez exceptions.
+
+    Maps HTTP status codes to Nukez exception types with
+    all relevant details extracted from the response.
+
+    Args:
+        response: HTTP response object (httpx.Response or requests.Response)
+
+    Raises:
+        PaymentRequiredError, AuthenticationError, NukezFileNotFoundError,
+        TransactionNotFoundError, URLExpiredError, RateLimitError, NukezError
+    """
+    error_details = parse_error_response(response)
+
+    # 402 Payment Required - contains payment instructions (multi-chain)
+    if response.status_code == 402:
+        pay_req_id = error_details.get("pay_req_id", "")
+        pay_to_address = error_details.get("pay_to_address", "")
+        amount_sol = error_details.get("amount_sol", 0)
+        amount_lamports = error_details.get("amount_lamports", 0)
+        network = error_details.get("network", "devnet")
+
+        # EVM / multi-chain fields
+        pay_asset = error_details.get("pay_asset", "SOL")
+        amount = str(error_details.get("amount", ""))
+        amount_raw = int(error_details.get("amount_raw", 0) or 0)
+        token_address = str(error_details.get("token_address", ""))
+        token_decimals = int(error_details.get("token_decimals", 0) or 0)
+
+        # Fallback: check nested 'price' object
+        if not pay_req_id or not pay_to_address:
+            price = error_details.get("price", {})
+            if not amount_sol and price:
+                amount_sol = price.get("amount_sol", 0)
+            if not amount_lamports and price:
+                amount_lamports = price.get("amount_lamports", 0)
+
+        # Fallback: check 'details' wrapper (some API versions)
+        if not pay_req_id:
+            details = error_details.get("details", {})
+            pay_req_id = details.get("pay_req_id", pay_req_id)
+            pay_to_address = details.get("pay_to_address", pay_to_address)
+            amount_sol = details.get("amount_sol", amount_sol)
+
+        # Calculate lamports from SOL if not provided (Solana only)
+        if amount_sol and not amount_lamports:
+            amount_lamports = int(float(amount_sol) * 1_000_000_000)
+
+        # Quote lifecycle fields
+        payment_options = error_details.get("payment_options")
+        quote_expires_at = error_details.get("quote_expires_at")
+        terms = error_details.get("terms")
+        quote_schema = error_details.get("quote_schema")
+        idempotency_key = error_details.get("idempotency_key")
+        price_breakdown = error_details.get("price")
+
+        # Debug logging if fields are missing
+        if not pay_req_id or not pay_to_address:
+            import sys
+            print(f"[nukez] WARNING: 402 response missing expected fields", file=sys.stderr)
+            print(f"[nukez] Response keys: {list(error_details.keys())}", file=sys.stderr)
+            print(f"[nukez] pay_req_id={pay_req_id!r}, pay_to_address={pay_to_address!r}", file=sys.stderr)
+
+        err = PaymentRequiredError(
+            pay_req_id=str(pay_req_id) if pay_req_id else "",
+            pay_to_address=str(pay_to_address) if pay_to_address else "",
+            amount_sol=float(amount_sol) if amount_sol else 0.0,
+            amount_lamports=int(amount_lamports) if amount_lamports else 0,
+            network=str(network) if network else "devnet",
+            pay_asset=str(pay_asset) if pay_asset else "SOL",
+            amount=amount,
+            amount_raw=amount_raw,
+            token_address=token_address,
+            token_decimals=token_decimals,
+            payment_options=payment_options,
+            quote_expires_at=quote_expires_at,
+            terms=terms,
+        )
+        if price_breakdown:
+            err.details["price_breakdown"] = price_breakdown
+        if quote_schema:
+            err.details["quote_schema"] = quote_schema
+        if idempotency_key:
+            err.details["idempotency_key"] = idempotency_key
+        raise err
+
+    # 401/403 Authentication errors
+    if response.status_code in (401, 403):
+        message = error_details.get("message", "Authentication failed")
+        missing_headers = error_details.get("missing_headers", [])
+
+        if "expired" in message.lower() or "url" in message.lower():
+            raise URLExpiredError(operation="access")
+
+        raise AuthenticationError(message=message, missing_headers=missing_headers)
+
+    # 404 Not Found
+    if response.status_code == 404:
+        error_code = error_details.get("error_code", "").lower()
+        message = error_details.get("message", "")
+
+        if "file" in error_code or "file" in message.lower():
+            filename = error_details.get("filename", "unknown")
+            locker_id = error_details.get("locker_id", "")
+            raise NukezFileNotFoundError(filename=filename, locker_id=locker_id)
+
+        raise NukezError(
+            f"Resource not found: {error_details.get('message', str(response.url))}",
+            details=error_details
+        )
+
+    # 409 Conflict
+    if response.status_code == 409:
+        tx_sig = error_details.get("tx_sig", "")
+        if tx_sig:
+            raise TransactionNotFoundError(tx_sig=tx_sig)
+
+        raise NukezError(
+            f"Conflict: {error_details.get('message', 'Resource conflict')}",
+            details=error_details
+        )
+
+    # 429 Rate Limited
+    if response.status_code == 429:
+        retry_after = int(response.headers.get("Retry-After", 60))
+        raise RateLimitError(retry_after=retry_after)
+
+    # 5xx Server Errors
+    if response.status_code >= 500:
+        error = NukezError(
+            f"Server error ({response.status_code}). "
+            "This may be temporary - try again in a few seconds.",
+            details=error_details
+        )
+        error.retryable = True
+        raise error
+
+    # Generic error for other status codes
+    message = error_details.get("message", f"HTTP {response.status_code}")
+    raise NukezError(message, details=error_details)
+
+
+# ---------------------------------------------------------------------------
+# Sync HTTP client (httpx.Client backend)
+# ---------------------------------------------------------------------------
 
 class HTTPClient:
     """
-    Internal HTTP client with Nukez-specific error handling.
+    Internal sync HTTP client with Nukez-specific error handling.
 
     Converts HTTP error responses into appropriate Nukez exceptions
     with actionable error messages for agents.
     """
-    
+
     def __init__(self, base_url: str, timeout: int = 30):
-        """
-        Initialize HTTP client.
-        
-        Args:
-            base_url: Nukez API base URL
-            timeout: Request timeout in seconds
-        """
         self.base_url = base_url.rstrip('/')
         self.timeout = timeout
-        self.session = requests.Session()
-        
-        # Standard headers
-        self.session.headers.update({
-            "User-Agent": "nukez-sdk/3.0.0",
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        })
-        
-    def _parse_json_response(self, response: requests.Response, method: str, path: str) -> Dict[str, Any]:
-        """
-        Safely parse JSON response body with clear error messages.
-        
-        Args:
-            response: HTTP response object
-            method: HTTP method (for error messages)
-            path: Request path (for error messages)
-            
-        Returns:
-            Parsed JSON as dict, or empty dict if no content
-            
-        Raises:
-            NukezError: If JSON parsing fails
-        """
-        if not response.content:
-            return {}
-    
-        try:
-            return response.json()
-        
-        except ValueError as e:
-            
-            # JSON decode error - provide clear message
-            content_preview = response.content[:200].decode('utf-8', errors='replace')
-            
-            raise NukezError(
-                f"Invalid JSON response from {method} {path}: {e}. "
-                f"Response content: {content_preview}..."
-            )
+        self.client = httpx.Client(
+            timeout=timeout,
+            headers=STANDARD_HEADERS.copy(),
+            follow_redirects=True,
+        )
 
-    def _parse_error_response(self, response: requests.Response) -> dict:
-        """
-        Safely parse error response body.
-        
-        FIXED: Better error handling and logging for debugging.
-        """
-        try:
-            if response.content:
-                # Attempt JSON parsing
-                data = response.json()
-                return data if isinstance(data, dict) else {}
-        except (ValueError, TypeError) as e:
-            # Log parsing failure for debugging
-            import sys
-            print(f"[nukez] WARNING: Failed to parse response JSON: {e}", file=sys.stderr)
-            print(f"[nukez] Response content: {response.content[:500]}", file=sys.stderr)
-        return {}
-    
-    def _handle_error_response(self, response: requests.Response):
-        """
-        Convert HTTP error responses to appropriate exceptions.
-        
-        Maps HTTP status codes to Nukez exception types with
-        all relevant details extracted from the response.
-        
-        FIXED: Better extraction of 402 payment fields with fallback paths.
-        """
-        error_details = self._parse_error_response(response)
-        
-        # 402 Payment Required - contains payment instructions (multi-chain)
-        if response.status_code == 402:
-            # Extract payment fields - try multiple possible locations
-            # Primary: top-level fields (as seen in curl tests)
-            pay_req_id = error_details.get("pay_req_id", "")
-            pay_to_address = error_details.get("pay_to_address", "")
-            amount_sol = error_details.get("amount_sol", 0)
-            amount_lamports = error_details.get("amount_lamports", 0)
-            network = error_details.get("network", "devnet")
+    def close(self):
+        """Close the underlying HTTP client."""
+        self.client.close()
 
-            # EVM / multi-chain fields (Phase 2)
-            pay_asset = error_details.get("pay_asset", "SOL")
-            amount = str(error_details.get("amount", ""))        # human-readable
-            amount_raw = int(error_details.get("amount_raw", 0) or 0)
-            token_address = str(error_details.get("token_address", ""))
-            token_decimals = int(error_details.get("token_decimals", 0) or 0)
+    def __enter__(self):
+        return self
 
-            # Fallback: check nested 'price' object
-            if not pay_req_id or not pay_to_address:
-                price = error_details.get("price", {})
-                if not amount_sol and price:
-                    amount_sol = price.get("amount_sol", 0)
-                if not amount_lamports and price:
-                    amount_lamports = price.get("amount_lamports", 0)
+    def __exit__(self, *args):
+        self.close()
 
-            # Fallback: check 'details' wrapper (some API versions)
-            if not pay_req_id:
-                details = error_details.get("details", {})
-                pay_req_id = details.get("pay_req_id", pay_req_id)
-                pay_to_address = details.get("pay_to_address", pay_to_address)
-                amount_sol = details.get("amount_sol", amount_sol)
-
-            # Calculate lamports from SOL if not provided (Solana only)
-            if amount_sol and not amount_lamports:
-                amount_lamports = int(float(amount_sol) * 1_000_000_000)
-
-            # Quote lifecycle fields
-            payment_options = error_details.get("payment_options")
-            quote_expires_at = error_details.get("quote_expires_at")
-            terms = error_details.get("terms")
-            # Also extract for downstream passthrough (stored in error details dict)
-            quote_schema = error_details.get("quote_schema")
-            idempotency_key = error_details.get("idempotency_key")
-            price_breakdown = error_details.get("price")  # nested price object
-
-            # Debug logging if fields are missing
-            if not pay_req_id or not pay_to_address:
-                import sys
-                print(f"[nukez] WARNING: 402 response missing expected fields", file=sys.stderr)
-                print(f"[nukez] Response keys: {list(error_details.keys())}", file=sys.stderr)
-                print(f"[nukez] pay_req_id={pay_req_id!r}, pay_to_address={pay_to_address!r}", file=sys.stderr)
-
-            err = PaymentRequiredError(
-                pay_req_id=str(pay_req_id) if pay_req_id else "",
-                pay_to_address=str(pay_to_address) if pay_to_address else "",
-                amount_sol=float(amount_sol) if amount_sol else 0.0,
-                amount_lamports=int(amount_lamports) if amount_lamports else 0,
-                network=str(network) if network else "devnet",
-                pay_asset=str(pay_asset) if pay_asset else "SOL",
-                amount=amount,
-                amount_raw=amount_raw,
-                token_address=token_address,
-                token_decimals=token_decimals,
-                payment_options=payment_options,
-                quote_expires_at=quote_expires_at,
-                terms=terms,
-            )
-            # Stash extra fields for request_storage() passthrough
-            if price_breakdown:
-                err.details["price_breakdown"] = price_breakdown
-            if quote_schema:
-                err.details["quote_schema"] = quote_schema
-            if idempotency_key:
-                err.details["idempotency_key"] = idempotency_key
-            raise err
-        
-        # 401/403 Authentication errors
-        if response.status_code in (401, 403):
-            message = error_details.get("message", "Authentication failed")
-            missing_headers = error_details.get("missing_headers", [])
-            
-            # Check if it's an expired URL
-            if "expired" in message.lower() or "url" in message.lower():
-                raise URLExpiredError(operation="access")
-            
-            raise AuthenticationError(message=message, missing_headers=missing_headers)
-        
-        # 404 Not Found
-        if response.status_code == 404:
-            error_code = error_details.get("error_code", "").lower()
-            message = error_details.get("message", "")
-            
-            # Check if it's a file not found
-            if "file" in error_code or "file" in message.lower():
-                filename = error_details.get("filename", "unknown")
-                locker_id = error_details.get("locker_id", "")
-                raise NukezFileNotFoundError(filename=filename, locker_id=locker_id)
-            
-            raise NukezError(
-                f"Resource not found: {error_details.get('message', response.url)}",
-                details=error_details
-            )
-        
-        # 409 Conflict - often transaction propagation issues
-        if response.status_code == 409:
-            tx_sig = error_details.get("tx_sig", "")
-            if tx_sig:
-                raise TransactionNotFoundError(tx_sig=tx_sig)
-            
-            raise NukezError(
-                f"Conflict: {error_details.get('message', 'Resource conflict')}",
-                details=error_details
-            )
-        
-        # 429 Rate Limited
-        if response.status_code == 429:
-            retry_after = int(response.headers.get("Retry-After", 60))
-            raise RateLimitError(retry_after=retry_after)
-        
-        # 5xx Server Errors
-        if response.status_code >= 500:
-            error = NukezError(
-                f"Server error ({response.status_code}). "
-                "This may be temporary - try again in a few seconds.",
-                details=error_details
-            )
-            error.retryable = True
-            raise error
-        
-        # Generic error for other status codes
-        message = error_details.get("message", f"HTTP {response.status_code}")
-        raise NukezError(message, details=error_details)
-    
     def get(
-        self, 
-        path: str, 
-        params: dict = None, 
+        self,
+        path: str,
+        params: dict = None,
         headers: dict = None
     ) -> Dict[str, Any]:
-        """
-        Execute GET request.
-        
-        Args:
-            path: API path (e.g., "/v1/price")
-            params: Query parameters
-            headers: Additional headers
-            
-        Returns:
-            Parsed JSON response
-            
-        Raises:
-            NukezError: On request failure
-        """
+        """Execute GET request."""
         url = f"{self.base_url}{path}"
-        
+
         try:
-            response = self.session.get(
+            response = self.client.get(
                 url,
                 params=params,
                 headers=headers or {},
-                timeout=self.timeout
             )
-        except requests.Timeout:
+        except httpx.TimeoutException:
             raise NukezError(f"Request timed out after {self.timeout}s: GET {path}")
-        
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             raise NukezError(f"Request failed: GET {path}: {e}")
-        
+
         if response.status_code >= 400:
-            self._handle_error_response(response)
-        
-        return self._parse_json_response(response, "GET", path)
-    
+            handle_error_response(response)
+
+        return parse_json_response(response, "GET", path)
+
     def post(
-        self, 
-        path: str, 
-        json: dict = None, 
+        self,
+        path: str,
+        json: dict = None,
         headers: dict = None,
         **kwargs
     ) -> Dict[str, Any]:
-        """
-        Execute POST request.
-        
-        Args:
-            path: API path
-            json: Request body (will be JSON-encoded)
-            headers: Additional headers
-            **kwargs: Additional requests kwargs
-            
-        Returns:
-            Parsed JSON response
-        """
+        """Execute POST request."""
         url = f"{self.base_url}{path}"
-        
+
         try:
-            response = self.session.post(
+            response = self.client.post(
                 url,
                 json=json,
                 headers=headers or {},
-                timeout=self.timeout,
                 **kwargs
             )
-        
-        except requests.Timeout:
+        except httpx.TimeoutException:
             raise NukezError(f"Request timed out after {self.timeout}s: POST {path}")
-        
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             raise NukezError(f"Request failed: POST {path}: {e}")
 
         if response.status_code >= 400:
-            self._handle_error_response(response)
+            handle_error_response(response)
 
-        return self._parse_json_response(response, "POST", path)
-    
+        return parse_json_response(response, "POST", path)
+
     def delete(
-        self, 
-        path: str, 
+        self,
+        path: str,
         headers: dict = None
     ) -> Dict[str, Any]:
-        """
-        Execute DELETE request.
-        
-        Args:
-            path: API path
-            headers: Additional headers
-            
-        Returns:
-            Parsed JSON response
-        """
+        """Execute DELETE request."""
         url = f"{self.base_url}{path}"
-        
+
         try:
-            response = self.session.delete(
+            response = self.client.delete(
                 url,
                 headers=headers or {},
-                timeout=self.timeout
             )
-        
-        except requests.Timeout:
+        except httpx.TimeoutException:
             raise NukezError(f"Request timed out after {self.timeout}s: DELETE {path}")
-        
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             raise NukezError(f"Request failed: DELETE {path}: {e}")
 
         if response.status_code >= 400:
-            self._handle_error_response(response)
+            handle_error_response(response)
 
-        return self._parse_json_response(response, "DELETE", path)
-    
+        return parse_json_response(response, "DELETE", path)
+
     def put(
-        self, 
-        path: str, 
+        self,
+        path: str,
         json: dict = None,
-        data: bytes = None,
+        content: bytes = None,
         headers: dict = None
     ) -> Dict[str, Any]:
-        """
-        Execute PUT request.
-        
-        Args:
-            path: API path
-            json: Request body as dict (will be JSON-encoded)
-            data: Raw request body as bytes
-            headers: Additional headers
-            
-        Returns:
-            Parsed JSON response
-        """
+        """Execute PUT request."""
         url = f"{self.base_url}{path}"
-        
+
         try:
-            response = self.session.put(
+            response = self.client.put(
                 url,
                 json=json,
-                data=data,
+                content=content,
                 headers=headers or {},
-                timeout=self.timeout
             )
-        
-        except requests.Timeout:
+        except httpx.TimeoutException:
             raise NukezError(f"Request timed out after {self.timeout}s: PUT {path}")
-        
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             raise NukezError(f"Request failed: PUT {path}: {e}")
 
         if response.status_code >= 400:
-            self._handle_error_response(response)
+            handle_error_response(response)
 
-        return self._parse_json_response(response, "PUT", path)
+        return parse_json_response(response, "PUT", path)

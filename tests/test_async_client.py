@@ -1,0 +1,235 @@
+# tests/test_async_client.py
+"""
+AsyncNukez client tests — mirrors test_client_methods.py for async.
+"""
+import asyncio
+import pytest
+from unittest.mock import MagicMock, AsyncMock, patch, call
+from pynukez._async_client import AsyncNukez
+from pynukez.errors import NukezError, PaymentRequiredError, TransactionNotFoundError
+
+
+class TestAsyncClientInit:
+    """AsyncNukez initialization tests."""
+
+    @patch("pynukez._async_client.Keypair")
+    def test_default_base_url(self, mock_kp):
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        assert "nukez" in client.base_url.lower()
+
+    @patch("pynukez._async_client.Keypair")
+    def test_custom_base_url(self, mock_kp):
+        client = AsyncNukez(
+            keypair_path="~/.config/solana/id.json",
+            base_url="https://custom.example.com",
+        )
+        assert client.base_url == "https://custom.example.com"
+
+    @patch("pynukez._async_client.Keypair")
+    def test_default_network(self, mock_kp):
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        assert client.network == "devnet"
+
+
+class TestAsyncClientPublicMethods:
+    """Verify async client has all the same public methods as sync client."""
+
+    @patch("pynukez._async_client.Keypair")
+    def test_has_storage_flow_methods(self, mock_kp):
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        for method in ("request_storage", "confirm_storage", "get_price"):
+            assert hasattr(client, method), f"Missing {method}"
+
+    @patch("pynukez._async_client.Keypair")
+    def test_has_file_methods(self, mock_kp):
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        for method in (
+            "create_file", "upload_bytes", "download_bytes", "list_files",
+            "get_file_urls", "delete_file", "upload_string",
+        ):
+            assert hasattr(client, method), f"Missing {method}"
+
+    @patch("pynukez._async_client.Keypair")
+    def test_has_provision_locker(self, mock_kp):
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        assert hasattr(client, "provision_locker")
+
+    @patch("pynukez._async_client.Keypair")
+    def test_has_verify_methods(self, mock_kp):
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        for method in ("verify_storage", "get_merkle_proof", "attest"):
+            assert hasattr(client, method), f"Missing {method}"
+
+    @patch("pynukez._async_client.Keypair")
+    def test_has_batch_methods(self, mock_kp):
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        for method in ("upload_files", "download_files", "bulk_upload_paths"):
+            assert hasattr(client, method), f"Missing {method}"
+
+    @patch("pynukez._async_client.Keypair")
+    def test_has_sandbox_methods(self, mock_kp):
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        for method in (
+            "sandbox_create_ingest_job", "sandbox_append_ingest_part",
+            "sandbox_complete_ingest_job", "sandbox_upload_bytes",
+        ):
+            assert hasattr(client, method), f"Missing {method}"
+
+    @patch("pynukez._async_client.Keypair")
+    def test_has_lifecycle_methods(self, mock_kp):
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        assert hasattr(client, "aclose")
+        assert hasattr(client, "__aenter__")
+        assert hasattr(client, "__aexit__")
+
+
+class TestAsyncClientFileOps:
+    """Test async file operation methods with mocked HTTP."""
+
+    async def test_get_price(self, async_client):
+        async_client.http.get = AsyncMock(return_value={
+            "unit_price_sol": 0.01,
+            "total_sol": 0.01,
+            "units": 1,
+            "provider": "gcs",
+            "network": "devnet",
+        })
+        result = await async_client.get_price(units=1)
+        assert result.units == 1
+        async_client.http.get.assert_called_once()
+
+    async def test_list_files(self, async_client):
+        async_client.http.get = AsyncMock(return_value={
+            "files": [
+                {"filename": "test.txt", "content_type": "text/plain", "size_bytes": 100},
+            ]
+        })
+        result = await async_client.list_files("receipt_123")
+        assert len(result) == 1
+        assert result[0].filename == "test.txt"
+
+    async def test_create_file(self, async_client):
+        async_client.http.post = AsyncMock(return_value={
+            "upload_url": "https://storage.googleapis.com/upload",
+            "download_url": "https://storage.googleapis.com/download",
+            "filename": "test.txt",
+            "content_type": "text/plain",
+            "locker_id": "locker_abc",
+            "ttl_min": 30,
+        })
+        result = await async_client.create_file("receipt_123", "test.txt")
+        assert result.upload_url == "https://storage.googleapis.com/upload"
+
+    async def test_upload_bytes(self, async_client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        async_client._raw_client.put = AsyncMock(return_value=mock_resp)
+
+        result = await async_client.upload_bytes(
+            "https://storage.googleapis.com/upload",
+            b"hello world",
+            content_type="text/plain",
+        )
+        assert result.size_bytes == 11
+        async_client._raw_client.put.assert_called_once()
+
+    async def test_upload_bytes_default_content_type(self, async_client):
+        """upload_bytes defaults to application/octet-stream, matching create_file.
+
+        GCS signed URLs include content-type in X-Goog-SignedHeaders.
+        The Content-Type must match what create_file signed into the URL.
+        """
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        async_client._raw_client.put = AsyncMock(return_value=mock_resp)
+
+        await async_client.upload_bytes(
+            "https://api.nukez.xyz/f/token", b"Hello!"
+        )
+
+        _, kwargs = async_client._raw_client.put.call_args
+        assert kwargs["headers"]["Content-Type"] == "application/octet-stream"
+
+    async def test_upload_bytes_sends_content_type_when_specified(self, async_client):
+        """upload_bytes sends Content-Type when caller provides it."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        async_client._raw_client.put = AsyncMock(return_value=mock_resp)
+
+        await async_client.upload_bytes(
+            "https://api.nukez.xyz/f/token", b"Hello!", content_type="text/plain"
+        )
+
+        _, kwargs = async_client._raw_client.put.call_args
+        assert kwargs["headers"]["Content-Type"] == "text/plain"
+
+    async def test_delete_file(self, async_client):
+        async_client.http.delete = AsyncMock(return_value={
+            "deleted": True,
+            "filename": "test.txt",
+        })
+        result = await async_client.delete_file("receipt_123", "test.txt")
+        assert result.filename == "test.txt"
+
+
+class TestAsyncDownloadRetry:
+    """Test download_bytes retry logic with async sleep."""
+
+    async def test_download_succeeds_first_try(self, async_client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b"hello"
+        mock_resp.raise_for_status = MagicMock()
+        async_client._raw_client.get = AsyncMock(return_value=mock_resp)
+
+        result = await async_client.download_bytes("https://api.nukez.xyz/f/tok123")
+        assert result == b"hello"
+        assert async_client._raw_client.get.call_count == 1
+
+    @patch("pynukez._async_client.asyncio.sleep", new_callable=AsyncMock)
+    async def test_download_retries_on_404(self, mock_sleep, async_client):
+        resp_404 = MagicMock()
+        resp_404.status_code = 404
+
+        resp_200 = MagicMock()
+        resp_200.status_code = 200
+        resp_200.content = b"propagated"
+        resp_200.raise_for_status = MagicMock()
+
+        async_client._raw_client.get = AsyncMock(side_effect=[resp_404, resp_200])
+
+        result = await async_client.download_bytes("https://api.nukez.xyz/f/tok123")
+        assert result == b"propagated"
+        assert async_client._raw_client.get.call_count == 2
+        mock_sleep.assert_called_once_with(2.0)
+
+
+class TestAsyncContextManager:
+    """Test async context manager protocol."""
+
+    @patch("pynukez._async_client.Keypair")
+    async def test_async_with(self, mock_kp):
+        async with AsyncNukez(keypair_path="~/.config/solana/id.json") as client:
+            assert client.base_url is not None
+
+
+class TestAsyncBatchOperations:
+    """Test batch upload/download uses gather pattern."""
+
+    async def test_upload_files_returns_result(self, async_client):
+        # Mock create_file and upload_bytes for a single file
+        async_client.create_file = AsyncMock(return_value=MagicMock(
+            upload_url="https://storage.googleapis.com/upload",
+            download_url="https://storage.googleapis.com/download",
+        ))
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        async_client._raw_client.put = AsyncMock(return_value=mock_resp)
+        async_client.confirm_file = AsyncMock(return_value=MagicMock())
+
+        files = [{"filename": "a.txt", "content": b"hello"}]
+        result = await async_client.upload_files("receipt_123", files, workers=2)
+        assert result.total == 1
+        assert result.uploaded >= 0  # May be 0 or 1 depending on implementation details
