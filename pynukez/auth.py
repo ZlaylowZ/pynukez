@@ -83,7 +83,14 @@ class Keypair:
             with open(self.keypair_path, 'r') as f:
                 data = json.load(f)
             
-            if isinstance(data, list) and len(data) >= 32:
+            if isinstance(data, dict) and ("private_key" in data or "address" in data):
+                raise NukezError(
+                    f"EVM key file detected at {self.keypair_path}. "
+                    f"Keypair() is for Ed25519 (Solana) keys only. "
+                    f"For EVM/Monad keys, use evm_private_key_path= instead of keypair_path= "
+                    f"when initializing Nukez/AsyncNukez, or use EVMSigner.from_file() directly."
+                )
+            elif isinstance(data, list) and len(data) >= 32:
                 # Take first 32 bytes as seed (standard Solana format)
                 seed = bytes(data[:32])
                 self.signing_key = SigningKey(seed)

@@ -187,6 +187,20 @@ class Nukez:
         self._auto_bind_operator = auto_bind_operator
 
         # Signer resolution: signing_key > keypair_path > evm_private_key_path
+        # Auto-detect: if keypair_path points to an EVM-format key file,
+        # treat it as evm_private_key_path instead of failing.
+        if keypair_path and not evm_private_key_path and not signing_key:
+            try:
+                kp = Path(keypair_path).expanduser()
+                if kp.exists():
+                    with open(kp, "r") as _f:
+                        _data = json.load(_f)
+                    if isinstance(_data, dict) and ("private_key" in _data or "address" in _data):
+                        evm_private_key_path = keypair_path
+                        keypair_path = None
+            except Exception:
+                pass  # Let Keypair() handle the error with its clear message
+
         self._signer = None
         self.keypair: Optional[Keypair] = None
 
