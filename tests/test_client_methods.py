@@ -404,3 +404,101 @@ class TestUploadBytesContentType:
         client.upload_bytes("https://api.nukez.xyz/f/token", b"data")
 
         client._raw_client.put.assert_called_once()
+
+
+class TestDelegatingFlag:
+    """Verify _is_delegating and delegating= threading to build_signed_envelope."""
+
+    @patch("pynukez.client.Keypair")
+    def test_is_delegating_returns_true_when_signer_differs(self, mock_kp):
+        """Operator signer (different identity) → _is_delegating returns True."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        # Simulate: signer is an operator, owner is someone else
+        mock_signer = MagicMock()
+        mock_signer.identity = "operator_pubkey_abc"
+        client._signer = mock_signer
+        client._owner_cache["receipt_123"] = "owner_pubkey_xyz"
+
+        assert client._is_delegating("receipt_123") is True
+
+    @patch("pynukez.client.Keypair")
+    def test_is_delegating_returns_false_when_signer_is_owner(self, mock_kp):
+        """Owner signer (same identity) → _is_delegating returns False."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        mock_signer = MagicMock()
+        mock_signer.identity = "owner_pubkey_xyz"
+        client._signer = mock_signer
+        client._owner_cache["receipt_123"] = "owner_pubkey_xyz"
+
+        assert client._is_delegating("receipt_123") is False
+
+    @patch("pynukez.client.Keypair")
+    def test_is_delegating_defaults_true_when_owner_unknown(self, mock_kp):
+        """Unknown owner (operator client that never provisioned) → True (safe default)."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        mock_signer = MagicMock()
+        mock_signer.identity = "operator_pubkey_abc"
+        client._signer = mock_signer
+        # No entry in _owner_cache
+
+        assert client._is_delegating("unknown_receipt") is True
+
+    @patch("pynukez.client.build_signed_envelope")
+    @patch("pynukez.client.Keypair")
+    def test_data_plane_passes_delegating_true_for_operator(self, mock_kp_cls, mock_build):
+        """Data-plane method (list_files) passes delegating=True when signer != owner."""
+        mock_build.return_value = MagicMock(
+            headers={"X-Nukez-Envelope": "e", "X-Nukez-Signature": "s"},
+        )
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        client.http = MagicMock()
+        client.http.get.return_value = {"files": []}
+
+        # Set up operator scenario: signer != owner
+        mock_signer = MagicMock()
+        mock_signer.identity = "operator_pubkey_abc"
+        client._signer = mock_signer
+        client._owner_cache["receipt_123"] = "owner_pubkey_xyz"
+
+        client.list_files("receipt_123")
+
+        # Verify build_signed_envelope was called with delegating=True
+        assert mock_build.call_args.kwargs["delegating"] is True
+
+    @patch("pynukez.client.build_signed_envelope")
+    @patch("pynukez.client.Keypair")
+    def test_data_plane_passes_delegating_false_for_owner(self, mock_kp_cls, mock_build):
+        """Data-plane method (list_files) passes delegating=False when signer == owner."""
+        mock_build.return_value = MagicMock(
+            headers={"X-Nukez-Envelope": "e", "X-Nukez-Signature": "s"},
+        )
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        client.http = MagicMock()
+        client.http.get.return_value = {"files": []}
+
+        # Set up owner scenario: signer == owner
+        mock_signer = MagicMock()
+        mock_signer.identity = "owner_pubkey_xyz"
+        client._signer = mock_signer
+        client._owner_cache["receipt_123"] = "owner_pubkey_xyz"
+
+        client.list_files("receipt_123")
+
+        # Verify build_signed_envelope was called with delegating=False
+        assert mock_build.call_args.kwargs["delegating"] is False
+
+    @patch("pynukez.client.build_signed_envelope")
+    @patch("pynukez.client.Keypair")
+    def test_admin_op_does_not_pass_delegating(self, mock_kp_cls, mock_build):
+        """Admin method (add_operator) does NOT pass delegating — owner-only."""
+        mock_build.return_value = MagicMock(
+            headers={"X-Nukez-Envelope": "e", "X-Nukez-Signature": "s"},
+        )
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        client.http = MagicMock()
+        client.http.post.return_value = {"ok": True, "operator_ids": []}
+
+        client.add_operator("receipt_123", "some_operator_pubkey")
+
+        # Admin ops should NOT have delegating in kwargs (defaults to False)
+        assert "delegating" not in mock_build.call_args.kwargs

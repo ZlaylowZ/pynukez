@@ -164,6 +164,12 @@ class AsyncNukez:
                     "Install with: pip install pynukez[evm]"
                 )
 
+        # Owner identity cache: receipt_id → owner identity string.
+        # Populated by confirm_storage() and provision_locker().
+        # Used by _is_delegating() to decide whether the signer field
+        # must appear in the envelope (operator delegation).
+        self._owner_cache: Dict[str, str] = {}
+
         # Lazy-initialized payment handlers
         self._payment = None
         self._keypair_path = keypair_path
@@ -200,6 +206,25 @@ class AsyncNukez:
                 "Provide keypair_path, evm_private_key_path, or signing_key."
             )
         return self._signer
+
+    def _is_delegating(self, receipt_id: str) -> bool:
+        """Return True when the current signer is NOT the locker owner.
+
+        Uses ``_owner_cache`` (populated by :meth:`confirm_storage` and
+        :meth:`provision_locker`).  When the owner identity for a receipt_id
+        is unknown — e.g. a fresh operator client that never provisioned —
+        we default to ``True`` (include the ``signer`` field).  This is safe:
+        including ``signer`` when the signer *is* the owner just adds a
+        harmless identity comparison server-side, while *omitting* it when
+        the signer is an operator causes a hard ``AuthenticationError``.
+        """
+        if self._signer is None:
+            return False
+        owner = self._owner_cache.get(receipt_id)
+        if owner is None:
+            # Unknown owner — assume delegation (safe default).
+            return True
+        return self._signer.identity != owner
 
     def _require_keypair(self, operation: str) -> Keypair:
         """Ensure keypair is available. Deprecated — use _require_signer."""
@@ -598,6 +623,8 @@ class AsyncNukez:
                         price_usd=float(rcpt.get("price_usd", 0)),
                         authorized_operator=rcpt.get("authorized_operator") or data.get("authorized_operator"),
                     )
+                    # Cache owner identity for _is_delegating() lookups.
+                    self._owner_cache[data["receipt_id"]] = receipt.payer_pubkey
                     return receipt
 
                 if resp.status_code == 402:
@@ -680,7 +707,7 @@ class AsyncNukez:
 
         space = response.get("space", response)
 
-        return NukezManifest(
+        manifest = NukezManifest(
             locker_id=space.get("locker_id", locker_id),
             receipt_id=receipt_id,
             bucket=space.get("bucket", ""),
@@ -690,6 +717,11 @@ class AsyncNukez:
             cap_expires_in_sec=space.get("cap_expires_in_sec"),
             created_at=space.get("created_at"),
         )
+
+        # Cache owner identity — provision is owner-only, so signer IS the owner.
+        self._owner_cache[receipt_id] = signer.identity
+
+        return manifest
 
     # ------------------------------------------------------------------
     # OPERATOR DELEGATION
@@ -790,6 +822,7 @@ class AsyncNukez:
             path=f"/v1/lockers/{locker_id}/files",
             ops=["locker:write"],
             body=body,
+            delegating=self._is_delegating(receipt_id),
         )
 
         response = await self.http.post(
@@ -849,6 +882,7 @@ class AsyncNukez:
             path=f"/v1/lockers/{locker_id}/files/batch",
             ops=["locker:write"],
             body=body,
+            delegating=self._is_delegating(receipt_id),
         )
 
         return await self.http.post(
@@ -1306,6 +1340,7 @@ class AsyncNukez:
             path=path,
             ops=["locker:write"],
             body=body,
+            delegating=self._is_delegating(receipt_id),
         )
 
         return await self.http.post(path, headers=envelope.headers, data=envelope.canonical_body.encode("utf-8"))
@@ -1348,6 +1383,7 @@ class AsyncNukez:
             path=path,
             ops=["locker:write"],
             body=body,
+            delegating=self._is_delegating(receipt_id),
         )
         return await self.http.post(path, headers=envelope.headers, data=envelope.canonical_body.encode("utf-8"))
 
@@ -1373,6 +1409,7 @@ class AsyncNukez:
             path=path,
             ops=["locker:write"],
             body=body,
+            delegating=self._is_delegating(receipt_id),
         )
         return await self.http.post(path, headers=envelope.headers, data=envelope.canonical_body.encode("utf-8"))
 
@@ -1661,6 +1698,7 @@ class AsyncNukez:
             method="GET",
             path=f"/v1/lockers/{locker_id}/files",
             ops=["locker:list"],
+            delegating=self._is_delegating(receipt_id),
         )
 
         response = await self.http.get(
@@ -1699,6 +1737,7 @@ class AsyncNukez:
             method="GET",
             path=f"/v1/lockers/{locker_id}/files/{filename}",
             ops=["locker:read"],
+            delegating=self._is_delegating(receipt_id),
         )
 
         response = await self.http.get(
@@ -1725,6 +1764,7 @@ class AsyncNukez:
             method="DELETE",
             path=f"/v1/lockers/{locker_id}/files/{filename}",
             ops=["locker:write"],
+            delegating=self._is_delegating(receipt_id),
         )
 
         response = await self.http.delete(
@@ -1749,6 +1789,7 @@ class AsyncNukez:
             method="GET",
             path=f"/v1/lockers/{locker_id}/manifest",
             ops=["locker:read"],
+            delegating=self._is_delegating(receipt_id),
         )
 
         return await self.http.get(
@@ -1950,6 +1991,7 @@ class AsyncNukez:
             path=f"/v1/lockers/{locker_id}/files/urls",
             ops=["locker:read"],
             body=body,
+            delegating=self._is_delegating(receipt_id),
         )
 
         return await self.http.post(
