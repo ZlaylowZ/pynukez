@@ -100,13 +100,30 @@ class Keypair:
         """Get public key as Base58 string (Solana address format)."""
         return base58.b58encode(self.signing_key.verify_key.encode()).decode()
     
+    @property
+    def identity(self) -> str:
+        """Canonical public identifier (base58 for Ed25519).
+
+        Satisfies the Signer protocol.
+        """
+        return self.pubkey_b58
+
+    @property
+    def sig_alg(self) -> str:
+        """Signature algorithm. Satisfies the Signer protocol."""
+        return "ed25519"
+
+    def sign(self, message: bytes) -> str:
+        """Sign and return base58-encoded signature. Satisfies the Signer protocol."""
+        return self.sign_message(message)
+
     def sign_message(self, message: bytes) -> str:
         """
         Sign message bytes and return Base58-encoded signature.
-        
+
         Args:
             message: Bytes to sign
-            
+
         Returns:
             Base58-encoded signature string
         """
@@ -139,55 +156,67 @@ def compute_locker_id(receipt_id: str) -> str:
 
 
 def build_signed_envelope(
-    keypair: Keypair,
-    receipt_id: str,
-    method: str,
-    path: str,
-    ops: List[str],
+    signer: "Signer" = None,
+    receipt_id: str = "",
+    method: str = "",
+    path: str = "",
+    ops: List[str] = None,
     body: Optional[Union[Dict, str]] = None,
-    ttl_seconds: int = 300
+    ttl_seconds: int = 300,
+    delegating: bool = False,
+    # Deprecated — use signer
+    keypair: "Keypair" = None,
 ) -> SignedEnvelope:
     """
     Build signed envelope for Nukez API authentication.
-    
+
     CRITICAL: This implementation MUST match the server's expectations exactly.
     The envelope structure, field names, and canonicalization are all verified
     server-side. Any deviation causes authentication failure.
-    
-    Extracted from nukez GenericAgentTools - proven with 70-98% success
-    across 8+ AI models in autonomous testing.
-    
+
     Args:
-        keypair: Keypair for signing
+        signer: Signer instance (Keypair or EVMSigner) for signing.
         receipt_id: Receipt ID from confirm_storage()
         method: HTTP method (GET, POST, PUT, DELETE)
         path: API path (e.g., "/v1/lockers/{id}/files")
         ops: Required operations (e.g., ["locker:write"])
         body: Request body dict for POST/PUT (will be canonicalized)
         ttl_seconds: Envelope validity duration (default 5 minutes)
-        
+        delegating: If True, include signer identity in the envelope
+            (operator acting on behalf of owner). If False (default),
+            omit signer field (owner-direct operation).
+        keypair: DEPRECATED — use signer parameter instead.
+
     Returns:
         SignedEnvelope with headers and canonical body
-        
+
     Raises:
-        NukezError: If body missing for POST/PUT or invalid JSON
-        
+        NukezError: If no signer provided, or body missing for POST/PUT
+
     Critical implementation notes (DO NOT CHANGE):
         1. Envelope MUST include "v": 1 version field
         2. Field name is "receipt_id" not "sub"
         3. Field name is "body_sha256" not "body_hash"
         4. Nonce uses os.urandom(16).hex() for cryptographic randomness
         5. JSON canonicalization: separators=(',', ':'), sort_keys=True
-        6. Signature is Base58-encoded (not Base64)
-        7. Envelope is Base64URL-encoded with padding stripped
+        6. Envelope is Base64URL-encoded with padding stripped
     """
+    # Backward compat: accept keypair as positional or keyword
+    if signer is None and keypair is not None:
+        signer = keypair
+    if signer is None:
+        raise NukezError("build_signed_envelope requires a signer (or keypair)")
+
+    if ops is None:
+        ops = []
+
     # Compute locker_id from receipt_id
     locker_id = compute_locker_id(receipt_id)
-    
+
     # Handle body - CRITICAL for signature verification
     canonical_body = None
     body_sha256 = None
-    
+
     if body is not None:
         # Support both dict and string inputs (fallback tolerance for agents)
         if isinstance(body, str):
@@ -198,12 +227,12 @@ def build_signed_envelope(
                     "build_signed_envelope: 'body' must be valid JSON if provided as string. "
                     f"Received: {body[:100]}..."
                 )
-        
+
         # Canonical JSON - EXACT pattern from proven nukez implementation
         # This MUST match: json.dumps(body, separators=(',', ':'), sort_keys=True)
         canonical_body = json.dumps(body, separators=(',', ':'), sort_keys=True)
         body_sha256 = hashlib.sha256(canonical_body.encode('utf-8')).hexdigest()
-    
+
     # POST/PUT MUST have body for signature verification
     if method.upper() in ('POST', 'PUT') and canonical_body is None:
         raise NukezError(
@@ -211,14 +240,14 @@ def build_signed_envelope(
             "The server verifies the signature covers the request body. "
             "Pass body={} for empty body if needed."
         )
-    
+
     # For GET/DELETE, compute hash of empty string
     if method.upper() in ('GET', 'DELETE'):
         body_sha256 = hashlib.sha256(b'').hexdigest()
-    
+
     # Current timestamp
     now = int(time.time())
-    
+
     # Build envelope - EXACT structure from proven implementation
     # WARNING: Field names and structure are verified server-side
     envelope = {
@@ -232,26 +261,35 @@ def build_signed_envelope(
         "method": method.upper(),
         "path": path,
         "body_sha256": body_sha256,          # NOT "body_hash"
-        "signer": keypair.pubkey_b58,        # Operator delegation (ADR-3)
+        # Always set sig_alg. Gateway falls back to signature format inference
+        # for old SDKs, but we always emit it explicitly for clarity.
+        "sig_alg": signer.sig_alg,
     }
-    
+
+    # Only include signer field when delegating (operator != owner).
+    # The presence of "signer" is a semantic signal — it means delegation.
+    # Omitting it for owner-direct envelopes avoids a needless OwnerIdentity
+    # comparison on every request in the gateway.
+    if delegating:
+        envelope["signer"] = signer.identity
+
     # Canonicalize envelope for signing - MUST use exact same pattern
     envelope_json = json.dumps(envelope, separators=(',', ':'), sort_keys=True)
-    
+
     # Sign the canonical envelope bytes
-    signature = keypair.sign_message(envelope_json.encode('utf-8'))
-    
+    signature = signer.sign(envelope_json.encode('utf-8'))
+
     # Encode envelope for header - Base64URL without padding
     envelope_b64 = base64.urlsafe_b64encode(
         envelope_json.encode('utf-8')
     ).decode().rstrip('=')
-    
+
     # Build headers
     headers = {
         "X-Nukez-Envelope": envelope_b64,
-        "X-Nukez-Signature": signature  # Base58-encoded
+        "X-Nukez-Signature": signature
     }
-    
+
     return SignedEnvelope(
         headers=headers,
         canonical_body=canonical_body,

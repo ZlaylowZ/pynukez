@@ -381,3 +381,138 @@ class RateLimitError(NukezError):
         )
         self.retry_after = retry_after
         self.retryable = True
+
+
+# ---------------------------------------------------------------------------
+# Operator delegation errors
+# ---------------------------------------------------------------------------
+
+class OperatorError(NukezError):
+    """
+    Base for operator delegation errors.
+
+    All operator-related failures inherit from this class,
+    so callers can ``except OperatorError`` to catch any delegation issue.
+
+    Attributes:
+        error_code: Gateway error code (e.g. "OPERATOR_IS_OWNER")
+        pubkey: Operator pubkey involved (if applicable)
+        locker_id: Locker ID involved (if applicable)
+    """
+
+    def __init__(self, message: str, error_code: str, pubkey: str = "", locker_id: str = ""):
+        super().__init__(message, details={
+            "error_code": error_code,
+            "pubkey": pubkey,
+            "locker_id": locker_id,
+        })
+        self.error_code = error_code
+        self.pubkey = pubkey
+        self.locker_id = locker_id
+
+
+class InvalidOperatorPubkeyError(OperatorError):
+    """
+    400 INVALID_OPERATOR_PUBKEY — pubkey is not valid base58 or wrong length.
+
+    Recovery:
+        Provide a valid Ed25519 public key encoded as base58 (32-44 chars).
+    """
+
+    def __init__(self, pubkey: str = "", locker_id: str = ""):
+        super().__init__(
+            f"Invalid operator pubkey: '{pubkey}'. Must be a valid base58 key (32-44 chars) or 0x EVM address (42 chars).",
+            error_code="INVALID_OPERATOR_PUBKEY",
+            pubkey=pubkey,
+            locker_id=locker_id,
+        )
+
+
+class OperatorIsOwnerError(OperatorError):
+    """
+    400 OPERATOR_IS_OWNER / OPERATOR_IS_PAYER — cannot delegate to yourself.
+
+    Recovery:
+        Use a different Ed25519 keypair as the operator.
+    """
+
+    def __init__(self, pubkey: str = "", locker_id: str = "", error_code: str = "OPERATOR_IS_OWNER"):
+        super().__init__(
+            f"Operator pubkey cannot be the same as the owner/payer: '{pubkey}'.",
+            error_code=error_code,
+            pubkey=pubkey,
+            locker_id=locker_id,
+        )
+
+
+class OperatorNotAuthorizedError(OperatorError):
+    """
+    403 NOT_AUTHORIZED_OPERATOR — signer is not in the locker's operator list.
+
+    Recovery:
+        The locker owner must call add_operator() to authorize this key first.
+    """
+
+    def __init__(self, pubkey: str = "", locker_id: str = ""):
+        super().__init__(
+            f"Operator '{pubkey}' is not authorized for this locker. "
+            "The owner must call add_operator() first.",
+            error_code="NOT_AUTHORIZED_OPERATOR",
+            pubkey=pubkey,
+            locker_id=locker_id,
+        )
+
+
+class OwnerOnlyError(OperatorError):
+    """
+    403 OWNER_ONLY — only the locker owner can perform this action.
+
+    Recovery:
+        Use the owner keypair (the one that paid for the locker) to sign.
+    """
+
+    def __init__(self, locker_id: str = ""):
+        super().__init__(
+            "This action is restricted to the locker owner.",
+            error_code="OWNER_ONLY",
+            locker_id=locker_id,
+        )
+
+
+class OperatorNotFoundError(OperatorError):
+    """
+    404 OPERATOR_NOT_FOUND — trying to remove a pubkey that isn't an operator.
+
+    Recovery:
+        Check operator_ids returned by add_operator() or remove_operator().
+    """
+
+    def __init__(self, pubkey: str = "", locker_id: str = ""):
+        super().__init__(
+            f"Operator '{pubkey}' not found in this locker's operator list.",
+            error_code="OPERATOR_NOT_FOUND",
+            pubkey=pubkey,
+            locker_id=locker_id,
+        )
+
+
+class OperatorConflictError(OperatorError):
+    """
+    409 OPERATOR_ALREADY_EXISTS or MAX_OPERATORS_REACHED.
+
+    Recovery:
+        - OPERATOR_ALREADY_EXISTS: The pubkey is already an operator (no action needed).
+        - MAX_OPERATORS_REACHED: Remove an existing operator before adding a new one (max 5).
+    """
+
+    def __init__(self, error_code: str, pubkey: str = "", locker_id: str = ""):
+        if error_code == "MAX_OPERATORS_REACHED":
+            message = "Maximum operators reached (5). Remove an existing operator first."
+        else:
+            message = f"Operator '{pubkey}' already exists on this locker."
+        super().__init__(
+            message,
+            error_code=error_code,
+            pubkey=pubkey,
+            locker_id=locker_id,
+        )

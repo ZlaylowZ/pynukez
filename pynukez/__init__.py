@@ -28,6 +28,9 @@ Quick Start (async):
 from .client import Nukez
 from ._async_client import AsyncNukez
 
+# Signer protocol and implementations
+from .signer import Signer, EVMSigner
+
 # Data models and types
 from .types import (
     # Payment flow types
@@ -62,6 +65,9 @@ from .types import (
     BatchConfirmResult,
     AttestResult,
     BatchUploadResult,
+
+    # Operator delegation
+    OperatorResult,
 )
 
 # Error classes with agent-friendly messages
@@ -76,6 +82,14 @@ from .errors import (
     NukezNotProvisionedError,     # Locker needs provisioning
     InsufficientFundsError,       # Wallet balance too low
     RateLimitError,               # API rate limit hit
+    # Operator delegation errors
+    OperatorError,                # Base for all operator errors
+    InvalidOperatorPubkeyError,   # 400 bad pubkey format
+    OperatorIsOwnerError,         # 400 cannot delegate to self
+    OperatorNotAuthorizedError,   # 403 signer not in operator list
+    OwnerOnlyError,               # 403 owner-only action
+    OperatorNotFoundError,        # 404 removing non-existent operator
+    OperatorConflictError,        # 409 duplicate or max reached
 )
 
 # EVM payment support (optional — requires pip install pynukez[evm])
@@ -1155,7 +1169,7 @@ def get_tool_definitions() -> list:
                 "name": "nukez_verify_storage",
                 "description": "Verify storage integrity and get cryptographic attestation. Returns merkle_root (hash of all files), manifest_signature (gateway's Ed25519 signature), att_code (on-chain attestation badge), file_count, and per-file content hashes. Call after uploading data to confirm integrity.",
                 "parameters": {
-                    "type": "object", 
+                    "type": "object",
                     "properties": {
                         "receipt_id": {
                             "type": "string",
@@ -1165,5 +1179,147 @@ def get_tool_definitions() -> list:
                     "required": ["receipt_id"]
                 }
             }
-        }
+        },
+        # ── Attestation & Proof tools ────────────────────────────────
+        {
+            "type": "function",
+            "function": {
+                "name": "nukez_confirm_file",
+                "description": "Confirm a file's content hash with the server. The server computes the SHA-256 hash of the uploaded file and stores it. This is step 1 of the attestation trust chain: confirm_file → attest → verify_storage → get_merkle_proof.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "receipt_id": {
+                            "type": "string",
+                            "description": "Receipt ID from confirm_storage()"
+                        },
+                        "filename": {
+                            "type": "string",
+                            "description": "Name of the file to confirm"
+                        }
+                    },
+                    "required": ["receipt_id", "filename"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "nukez_confirm_files",
+                "description": "Confirm content hashes for multiple files in one call. Batch version of confirm_file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "receipt_id": {
+                            "type": "string",
+                            "description": "Receipt ID from confirm_storage()"
+                        },
+                        "filenames": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of filenames to confirm"
+                        }
+                    },
+                    "required": ["receipt_id", "filenames"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "nukez_attest",
+                "description": "Build a Merkle tree from confirmed file hashes and optionally push the root on-chain. This is step 2 of the attestation trust chain. Must call confirm_file for each file first. Returns tx_signature (on-chain attestation tx) and push_ok status.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "receipt_id": {
+                            "type": "string",
+                            "description": "Receipt ID from confirm_storage()"
+                        },
+                        "sync": {
+                            "type": "boolean",
+                            "description": "If true (default), wait for attestation to complete. If false, return 202 and poll verify_storage for result.",
+                            "default": True
+                        }
+                    },
+                    "required": ["receipt_id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "nukez_get_merkle_proof",
+                "description": "Get a per-file Merkle inclusion proof. Returns leaf_hash, proof path (sibling hashes), and merkle_root. This is step 4 of the trust chain: confirm_file → attest → verify_storage → get_merkle_proof. Must call attest first.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "receipt_id": {
+                            "type": "string",
+                            "description": "Receipt ID from confirm_storage()"
+                        },
+                        "filename": {
+                            "type": "string",
+                            "description": "Name of the file to get proof for"
+                        }
+                    },
+                    "required": ["receipt_id", "filename"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "nukez_get_wallet_info",
+                "description": "Get wallet information for the current keypair. Returns pubkey, balance in SOL, and network.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }
+        },
+        # ── Operator delegation tools ─────────────────────────────────
+        {
+            "type": "function",
+            "function": {
+                "name": "nukez_add_operator",
+                "description": "Authorize an Ed25519 operator to perform file operations on this locker. Owner-only. Max 5 operators. The operator_pubkey must differ from your own wallet pubkey. Returns ok and updated operator_ids list.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "receipt_id": {
+                            "type": "string",
+                            "description": "Receipt ID from confirm_storage()"
+                        },
+                        "operator_pubkey": {
+                            "type": "string",
+                            "description": "Base58-encoded Ed25519 public key to authorize (32-44 chars, must differ from your own wallet pubkey)"
+                        }
+                    },
+                    "required": ["receipt_id", "operator_pubkey"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "nukez_remove_operator",
+                "description": "Revoke an operator's access to this locker. Owner-only. Returns ok and updated operator_ids list.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "receipt_id": {
+                            "type": "string",
+                            "description": "Receipt ID from confirm_storage()"
+                        },
+                        "operator_pubkey": {
+                            "type": "string",
+                            "description": "Base58-encoded Ed25519 public key to remove"
+                        }
+                    },
+                    "required": ["receipt_id", "operator_pubkey"]
+                }
+            }
+        },
     ]

@@ -56,7 +56,7 @@ EVM_TOKENS: Dict[int, Dict[str, Dict[str, Any]]] = {
     },
     10143: {  # monad-testnet
         "MON":  {"address": "0x0000000000000000000000000000000000000000", "decimals": 18, "is_native": True},
-        "USDC": {"address": "0xf817257fed379853cDe0fa4F97AB987181B1E5Ea", "decimals": 6},
+        "USDC": {"address": "0x534b2f3A21130d7a60830c2Df862319e593943A3", "decimals": 6},
         "USDT": {"address": "0x88b8E2161DEDC77EF4ab7585569D2415a1C1055D", "decimals": 6},
         "WETH": {"address": "0xB5a30b0FDc5EA94A52fDc42e3E9760Cb8449Fb37", "decimals": 18},
     },

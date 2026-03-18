@@ -93,6 +93,7 @@ class Receipt:
     sig_alg: str = ""                           # "ed25519" or "secp256k1"
     unit_price_usd: float = 0.0
     price_usd: float = 0.0
+    authorized_operator: Optional[str] = None  # operator bound at confirm time
 
     def __post_init__(self):
         self.receipt_id = self.id #agent-visible alias
@@ -407,3 +408,10 @@ class BatchDownloadResult:
     elapsed_sec: float
     errors: List[Tuple[str, str]]    # (filename, error_message)
     files: List[DownloadedFile]
+
+
+@dataclass
+class OperatorResult:
+    """Result from add_operator() / remove_operator()."""
+    ok: bool
+    operator_ids: List[str]  # current list of operator pubkeys

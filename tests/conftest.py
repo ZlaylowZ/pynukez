@@ -12,6 +12,10 @@ def mock_keypair():
     with patch("pynukez.client.Keypair") as mock_kp:
         mock_kp.return_value.pubkey_b58 = "FakePublicKey123456789"
         mock_kp.return_value.sign_message.return_value = "FakeSignature"
+        # Signer protocol properties (Phase 2 retrofit)
+        mock_kp.return_value.identity = "FakePublicKey123456789"
+        mock_kp.return_value.sig_alg = "ed25519"
+        mock_kp.return_value.sign.return_value = "FakeSignature"
         yield mock_kp
 
 
@@ -30,6 +34,10 @@ def async_client(mock_keypair):
     with patch("pynukez._async_client.Keypair") as async_mock_kp:
         async_mock_kp.return_value.pubkey_b58 = "FakePublicKey123456789"
         async_mock_kp.return_value.sign_message.return_value = "FakeSignature"
+        # Signer protocol properties (Phase 2 retrofit)
+        async_mock_kp.return_value.identity = "FakePublicKey123456789"
+        async_mock_kp.return_value.sig_alg = "ed25519"
+        async_mock_kp.return_value.sign.return_value = "FakeSignature"
         from pynukez import AsyncNukez
         client = AsyncNukez(keypair_path="~/.config/solana/id.json")
         client.http = AsyncMock()

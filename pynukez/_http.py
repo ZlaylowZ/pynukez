@@ -21,6 +21,12 @@ from .errors import (
     NukezFileNotFoundError,
     URLExpiredError,
     RateLimitError,
+    InvalidOperatorPubkeyError,
+    OperatorIsOwnerError,
+    OperatorNotAuthorizedError,
+    OwnerOnlyError,
+    OperatorNotFoundError,
+    OperatorConflictError,
 )
 
 # Standard headers shared by sync and async clients
@@ -100,9 +106,127 @@ def handle_error_response(response) -> None:
         TransactionNotFoundError, URLExpiredError, RateLimitError, NukezError
     """
     error_details = parse_error_response(response)
+    error_code = error_details.get("error_code", "")
+    message = error_details.get("message", "")
+    pubkey = error_details.get("pubkey", "")
+    locker_id = error_details.get("locker_id", "")
+
+    # --- Operator delegation errors (checked before generic handlers) ---
+
+    # 400 operator errors
+    if response.status_code == 400 and error_code == "INVALID_OPERATOR_PUBKEY":
+        raise InvalidOperatorPubkeyError(pubkey=pubkey, locker_id=locker_id)
+    if response.status_code == 400 and error_code in ("OPERATOR_IS_OWNER", "OPERATOR_IS_PAYER"):
+        raise OperatorIsOwnerError(pubkey=pubkey, locker_id=locker_id, error_code=error_code)
+
+    # 403 operator errors
+    if response.status_code == 403 and error_code == "NOT_AUTHORIZED_OPERATOR":
+        raise OperatorNotAuthorizedError(pubkey=pubkey, locker_id=locker_id)
+    if response.status_code == 403 and error_code == "OWNER_ONLY":
+        raise OwnerOnlyError(locker_id=locker_id)
+
+    # 404 operator errors
+    if response.status_code == 404 and error_code == "OPERATOR_NOT_FOUND":
+        raise OperatorNotFoundError(pubkey=pubkey, locker_id=locker_id)
+
+    # 409 operator errors
+    if response.status_code == 409 and error_code in ("OPERATOR_ALREADY_EXISTS", "MAX_OPERATORS_REACHED"):
+        raise OperatorConflictError(error_code=error_code, pubkey=pubkey, locker_id=locker_id)
 
     # 402 Payment Required - contains payment instructions (multi-chain)
     if response.status_code == 402:
+        # ── x402 v2 format: accepts[] array with structured payment options ──
+        accepts = error_details.get("accepts")
+        if isinstance(accepts, list) and accepts:
+            pay_req_id, pay_to_address, amount_sol, amount_lamports = "", "", 0.0, 0
+            network, pay_asset = "devnet", "SOL"
+            amount, amount_raw, token_address, token_decimals = "", 0, "", 0
+            payment_options, quote_expires_at, terms = [], None, None
+            quote_schema, idempotency_key, price_breakdown = None, None, None
+
+            # Build payment_options from all accepts entries
+            for opt in accepts:
+                extra = opt.get("extra", {})
+                entry = {
+                    "network": opt.get("network", ""),
+                    "pay_to_address": opt.get("payTo", ""),
+                    "pay_asset": extra.get("name", ""),
+                    "amount": opt.get("amount", ""),
+                    "decimals": extra.get("decimals", 0),
+                    "human_amount": extra.get("human_amount", ""),
+                    "asset_contract": opt.get("asset", ""),
+                }
+                payment_options.append(entry)
+
+            # Select default payment option — prefer Solana, fall back to first
+            selected = accepts[0]
+            for opt in accepts:
+                net = opt.get("network", "")
+                if "solana" in net.lower():
+                    selected = opt
+                    break
+
+            extra = selected.get("extra", {})
+            raw_network = selected.get("network", "")
+
+            # Parse network: x402 uses "solana:EtW..." or "eip155:10143"
+            if raw_network.startswith("solana:"):
+                network = "solana-devnet"
+            elif raw_network.startswith("eip155:"):
+                network = "monad-testnet"
+            else:
+                network = raw_network
+
+            pay_to_address = selected.get("payTo", "")
+            pay_asset = extra.get("name", "SOL")
+            pay_req_id = extra.get("pay_req_id", "")
+            amount = selected.get("amount", "")
+            token_decimals = int(extra.get("decimals", 0) or 0)
+            quote_expires_at = extra.get("quote_expires_at")
+            idempotency_key = extra.get("idempotency_key")
+            quote_schema = extra.get("quote_schema")
+            terms = extra.get("terms")
+            price_breakdown = extra.get("price_summary")
+
+            asset_contract = selected.get("asset", "")
+            is_native = asset_contract in ("native", "So11111111111111111111111111111111111111112")
+
+            if "solana" in network:
+                if token_decimals:
+                    amount_sol = float(int(amount)) / (10 ** token_decimals)
+                else:
+                    amount_sol = float(int(amount)) / 1_000_000_000
+                amount_lamports = int(amount)
+                amount_raw = int(amount)
+            else:
+                amount_raw = int(amount)
+                if not is_native:
+                    token_address = asset_contract
+
+            err = PaymentRequiredError(
+                pay_req_id=pay_req_id,
+                pay_to_address=pay_to_address,
+                amount_sol=amount_sol,
+                amount_lamports=amount_lamports,
+                network=network,
+                pay_asset=pay_asset,
+                amount=str(amount),
+                amount_raw=amount_raw,
+                token_address=token_address,
+                token_decimals=token_decimals,
+                payment_options=payment_options,
+                quote_expires_at=quote_expires_at,
+                terms=terms,
+            )
+            if price_breakdown:
+                err.details["price_breakdown"] = price_breakdown
+            if quote_schema:
+                err.details["quote_schema"] = quote_schema
+            if idempotency_key:
+                err.details["idempotency_key"] = idempotency_key
+            raise err
+
+        # ── Legacy flat format (pre-x402) ──
         pay_req_id = error_details.get("pay_req_id", "")
         pay_to_address = error_details.get("pay_to_address", "")
         amount_sol = error_details.get("amount_sol", 0)

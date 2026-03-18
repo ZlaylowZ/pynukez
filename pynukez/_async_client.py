@@ -54,6 +54,7 @@ from .types import (
     FileViewerInfo,
     ViewerFileList,
     ViewerContainer,
+    OperatorResult,
 )
 
 from .auth import Keypair, build_signed_envelope, compute_locker_id
@@ -123,6 +124,8 @@ class AsyncNukez:
         timeout: int = None,
         evm_private_key_path: Optional[Union[str, Path]] = None,
         evm_rpc_url: Optional[str] = None,
+        auto_bind_operator: bool = True,
+        signing_key: Optional[Any] = None,
     ):
         self.base_url = base_url.rstrip('/')
         self.network = network
@@ -130,11 +133,23 @@ class AsyncNukez:
         self.timeout = timeout or 120
         self.http = AsyncHTTPClient(base_url, timeout=self.timeout)
         self._raw_client = _httpx.AsyncClient(timeout=60, follow_redirects=True)
+        self._auto_bind_operator = auto_bind_operator
 
-        # Optional keypair for signing operations
+        # Signer resolution: signing_key > keypair_path > evm_private_key_path
+        self._signer = None
         self.keypair: Optional[Keypair] = None
-        if keypair_path:
+
+        if signing_key is not None:
+            self._signer = signing_key
+        elif keypair_path:
             self.keypair = Keypair(keypair_path)
+            self._signer = self.keypair
+        elif evm_private_key_path:
+            from .signer import EVMSigner
+            self._signer = EVMSigner.from_file(str(evm_private_key_path))
+
+        if keypair_path and evm_private_key_path and signing_key is None:
+            pass  # Ed25519 keypair signs envelopes (backward compat)
 
         # Fail-fast: if caller wants EVM payments, verify web3 is available now
         if evm_private_key_path:
@@ -177,8 +192,17 @@ class AsyncNukez:
     # Internal helpers (pure computation, sync)
     # ------------------------------------------------------------------
 
+    def _require_signer(self, operation: str):
+        """Ensure a signer is available for envelope signing."""
+        if self._signer is None:
+            raise NukezError(
+                f"{operation} requires a signing key. "
+                "Provide keypair_path, evm_private_key_path, or signing_key."
+            )
+        return self._signer
+
     def _require_keypair(self, operation: str) -> Keypair:
-        """Ensure keypair is available, with helpful error message."""
+        """Ensure keypair is available. Deprecated — use _require_signer."""
         if not self.keypair:
             raise NukezError(
                 f"{operation} requires keypair_path. "
@@ -509,6 +533,7 @@ class AsyncNukez:
         initial_delay: float = 2.0,
         payment_chain: Optional[str] = None,
         payment_asset: Optional[str] = None,
+        operator_pubkey: Optional[str] = None,
     ) -> Receipt:
         """Step 3: Confirm payment and receive storage receipt (with retry)."""
         url = f"{self.base_url}/v1/storage/confirm"
@@ -517,6 +542,25 @@ class AsyncNukez:
             payload["payment_chain"] = payment_chain
         if payment_asset:
             payload["payment_asset"] = payment_asset
+        # Operator delegation: explicit param takes priority, then auto-infer
+        # for EVM payments (0x-prefixed tx hash) where the Ed25519 keypair
+        # must be bound as operator since the payer uses secp256k1.
+        if operator_pubkey:
+            payload["operator_pubkey"] = operator_pubkey
+        elif (self._auto_bind_operator
+              and self.keypair
+              and isinstance(tx_sig, str)
+              and tx_sig.startswith("0x")):
+            import warnings
+            warnings.warn(
+                "Auto-binding Ed25519 operator for EVM payments is deprecated. "
+                "EVM owners can now operate directly with secp256k1 envelopes. "
+                "Pass operator_pubkey explicitly or set auto_bind_operator=False. "
+                "This behavior will be removed in pynukez 4.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            payload["operator_pubkey"] = self.keypair.pubkey_b58
         headers = {
             "Content-Type": "application/json",
             "X402-TX": tx_sig,
@@ -552,6 +596,7 @@ class AsyncNukez:
                         sig_alg=data.get("sig_alg", rcpt.get("receipt_sig_alg", "")),
                         unit_price_usd=float(rcpt.get("unit_price_usd", 0)),
                         price_usd=float(rcpt.get("price_usd", 0)),
+                        authorized_operator=rcpt.get("authorized_operator") or data.get("authorized_operator"),
                     )
                     return receipt
 
@@ -612,14 +657,14 @@ class AsyncNukez:
         operator_pubkey: Optional[str] = None,
     ) -> NukezManifest:
         """Create storage locker namespace for files."""
-        keypair = self._require_keypair("provision_locker")
+        signer = self._require_signer("provision_locker")
         locker_id = compute_locker_id(receipt_id)
         body = {"receipt_id": receipt_id, "tags": tags or []}
         if operator_pubkey:
             body["operator_pubkey"] = operator_pubkey
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path="/v1/storage/signed_provision",
@@ -646,6 +691,81 @@ class AsyncNukez:
             created_at=space.get("created_at"),
         )
 
+    # ------------------------------------------------------------------
+    # OPERATOR DELEGATION
+    # ------------------------------------------------------------------
+
+    async def add_operator(self, receipt_id: str, operator_pubkey: str) -> OperatorResult:
+        """
+        Authorize an Ed25519 operator to perform file operations on this locker.
+
+        Owner-only. Max 5 operators. Cannot add self.
+
+        Args:
+            receipt_id: Receipt ID from confirm_storage()
+            operator_pubkey: Base58-encoded Ed25519 public key to authorize
+
+        Returns:
+            OperatorResult with ok=True and current operator_ids list
+        """
+        signer = self._require_signer("add_operator")
+        locker_id = compute_locker_id(receipt_id)
+        body = {"pubkey": operator_pubkey}
+
+        envelope = build_signed_envelope(
+            signer=signer,
+            receipt_id=receipt_id,
+            method="POST",
+            path=f"/v1/lockers/{locker_id}/operators",
+            ops=["locker:admin"],
+            body=body,
+        )
+
+        response = await self.http.post(
+            f"/v1/lockers/{locker_id}/operators",
+            headers=envelope.headers,
+            data=envelope.canonical_body.encode("utf-8"),
+        )
+
+        return OperatorResult(
+            ok=response.get("ok", True),
+            operator_ids=response.get("operator_ids", []),
+        )
+
+    async def remove_operator(self, receipt_id: str, operator_pubkey: str) -> OperatorResult:
+        """
+        Revoke an operator's access to this locker.
+
+        Owner-only.
+
+        Args:
+            receipt_id: Receipt ID from confirm_storage()
+            operator_pubkey: Base58-encoded Ed25519 public key to remove
+
+        Returns:
+            OperatorResult with ok=True and updated operator_ids list
+        """
+        signer = self._require_signer("remove_operator")
+        locker_id = compute_locker_id(receipt_id)
+
+        envelope = build_signed_envelope(
+            signer=signer,
+            receipt_id=receipt_id,
+            method="DELETE",
+            path=f"/v1/lockers/{locker_id}/operators/{operator_pubkey}",
+            ops=["locker:admin"],
+        )
+
+        response = await self.http.delete(
+            f"/v1/lockers/{locker_id}/operators/{operator_pubkey}",
+            headers=envelope.headers,
+        )
+
+        return OperatorResult(
+            ok=response.get("ok", True),
+            operator_ids=response.get("operator_ids", []),
+        )
+
     async def create_file(
         self,
         receipt_id: str,
@@ -654,7 +774,7 @@ class AsyncNukez:
         ttl_min: int = 30,
     ) -> FileUrls:
         """Create a new file and get upload/download URLs."""
-        keypair = self._require_keypair("create_file")
+        signer = self._require_signer("create_file")
         locker_id = compute_locker_id(receipt_id)
 
         body = {
@@ -664,7 +784,7 @@ class AsyncNukez:
         }
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path=f"/v1/lockers/{locker_id}/files",
@@ -693,7 +813,7 @@ class AsyncNukez:
         ttl_min: int = 30,
     ) -> Dict[str, Any]:
         """Create multiple file entries and mint upload/download URLs in one call."""
-        keypair = self._require_keypair("create_files_batch")
+        signer = self._require_signer("create_files_batch")
         locker_id = compute_locker_id(receipt_id)
 
         if not files:
@@ -723,7 +843,7 @@ class AsyncNukez:
         }
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path=f"/v1/lockers/{locker_id}/files/batch",
@@ -1136,7 +1256,7 @@ class AsyncNukez:
         execution_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a sandbox-ingest job."""
-        keypair = self._require_keypair("sandbox_create_ingest_job")
+        signer = self._require_signer("sandbox_create_ingest_job")
         locker_id = compute_locker_id(receipt_id)
 
         if not files:
@@ -1180,7 +1300,7 @@ class AsyncNukez:
         path = f"/v1/lockers/{locker_id}/ingest/jobs"
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path=path,
@@ -1201,7 +1321,7 @@ class AsyncNukez:
         is_last: bool = False,
     ) -> Dict[str, Any]:
         """Append one base64 chunk into a sandbox-ingest job file."""
-        keypair = self._require_keypair("sandbox_append_ingest_part")
+        signer = self._require_signer("sandbox_append_ingest_part")
 
         raw_payload = (payload_b64 or "").strip()
         if not raw_payload:
@@ -1222,7 +1342,7 @@ class AsyncNukez:
         path = f"/v1/ingest/jobs/{job_id}/files/{file_id}/parts"
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path=path,
@@ -1239,7 +1359,7 @@ class AsyncNukez:
         file_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Finalize a sandbox-ingest job."""
-        keypair = self._require_keypair("sandbox_complete_ingest_job")
+        signer = self._require_signer("sandbox_complete_ingest_job")
 
         body: Dict[str, Any] = {}
         if file_ids:
@@ -1247,7 +1367,7 @@ class AsyncNukez:
 
         path = f"/v1/ingest/jobs/{job_id}/complete"
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path=path,
@@ -1532,11 +1652,11 @@ class AsyncNukez:
 
     async def list_files(self, receipt_id: str) -> List[FileInfo]:
         """List all files in locker."""
-        keypair = self._require_keypair("list_files")
+        signer = self._require_signer("list_files")
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="GET",
             path=f"/v1/lockers/{locker_id}/files",
@@ -1570,11 +1690,11 @@ class AsyncNukez:
         ttl_min: int = 30,
     ) -> FileUrls:
         """Get fresh upload/download URLs for existing file."""
-        keypair = self._require_keypair("get_file_urls")
+        signer = self._require_signer("get_file_urls")
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="GET",
             path=f"/v1/lockers/{locker_id}/files/{filename}",
@@ -1596,11 +1716,11 @@ class AsyncNukez:
 
     async def delete_file(self, receipt_id: str, filename: str) -> DeleteResult:
         """Delete file from locker."""
-        keypair = self._require_keypair("delete_file")
+        signer = self._require_signer("delete_file")
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="DELETE",
             path=f"/v1/lockers/{locker_id}/files/{filename}",
@@ -1620,11 +1740,11 @@ class AsyncNukez:
 
     async def get_manifest(self, receipt_id: str) -> dict:
         """Full locker state in one call."""
-        keypair = self._require_keypair("get_manifest")
+        signer = self._require_signer("get_manifest")
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="GET",
             path=f"/v1/lockers/{locker_id}/manifest",
@@ -1815,7 +1935,7 @@ class AsyncNukez:
         ttl_min: int = 30,
     ) -> dict:
         """Get signed download URLs for multiple files in one API call."""
-        keypair = self._require_keypair("get_batch_urls")
+        signer = self._require_signer("get_batch_urls")
         locker_id = compute_locker_id(receipt_id)
 
         body = {
@@ -1824,7 +1944,7 @@ class AsyncNukez:
         }
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path=f"/v1/lockers/{locker_id}/files/urls",

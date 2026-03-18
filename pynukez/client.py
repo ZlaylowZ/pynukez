@@ -45,6 +45,7 @@ from .types import (
     FileViewerInfo,
     ViewerFileList,
     ViewerContainer,
+    OperatorResult,
 )
 
 from .auth import Keypair, build_signed_envelope, compute_locker_id
@@ -142,30 +143,39 @@ class Nukez:
         timeout: int = None,
         evm_private_key_path: Optional[Union[str, Path]] = None,
         evm_rpc_url: Optional[str] = None,
+        auto_bind_operator: bool = True,
+        signing_key: Optional[Any] = None,
     ):
         """
         Initialize Nukez client.
 
         Args:
-            keypair_path: Path to Solana keypair file (required for Solana payments and signed requests)
+            keypair_path: Path to Solana keypair file (Ed25519 signing + Solana payments)
             base_url: Nukez API base URL
             network: Solana network ("devnet" or "mainnet-beta")
             rpc_url: Solana RPC URL
             timeout: HTTP timeout in seconds
-            evm_private_key_path: Path to EVM private key file (hex string or raw 32 bytes).
-                                  Required for EVM payments (Monad, Ethereum, etc.)
-            evm_rpc_url: EVM RPC URL override. If not set, uses env vars
-                        (MONAD_MAINNET_RPC_PRIMARY, MONAD_TESTNET_RPC_PRIMARY, etc.)
+            evm_private_key_path: Path to EVM private key JSON file.
+                When only this is provided (no keypair_path), the EVM key
+                is used for both payment AND envelope signing (secp256k1).
+            evm_rpc_url: EVM RPC URL override.
+            auto_bind_operator: When True (default), auto-bind Ed25519 keypair
+                as operator for EVM payments. Deprecated — set False for
+                EVM-native owners who sign their own envelopes.
+            signing_key: Explicit Signer instance for envelope signing.
+                Takes priority over keypair_path and evm_private_key_path.
 
         Example:
             # Solana only
-            client = Nukez(keypair_path="~/.config/solana/id.json", network="devnet")
+            client = Nukez(keypair_path="~/.config/solana/id.json")
 
-            # Multi-chain (Solana + Monad)
-            client = Nukez(
-                keypair_path="~/.config/solana/id.json",
-                evm_private_key_path="~/.nukez/evm_key.hex",
-            )
+            # EVM-only owner (signs envelopes with secp256k1)
+            client = Nukez(evm_private_key_path="~/.keys/evm_key.json",
+                           auto_bind_operator=False)
+
+            # Dual-key (Ed25519 for signing, EVM for payment)
+            client = Nukez(keypair_path="~/.keys/sol.json",
+                           evm_private_key_path="~/.keys/evm.json")
         """
 
         self.base_url = base_url.rstrip('/')
@@ -174,11 +184,29 @@ class Nukez:
         self.timeout = timeout or 120
         self.http = HTTPClient(base_url, timeout=self.timeout)
         self._raw_client = _httpx.Client(timeout=60, follow_redirects=True)
+        self._auto_bind_operator = auto_bind_operator
 
-        # Optional keypair for signing operations
+        # Signer resolution: signing_key > keypair_path > evm_private_key_path
+        self._signer = None
         self.keypair: Optional[Keypair] = None
-        if keypair_path:
+
+        if signing_key is not None:
+            self._signer = signing_key
+        elif keypair_path:
             self.keypair = Keypair(keypair_path)
+            self._signer = self.keypair
+        elif evm_private_key_path:
+            # EVM-only: use EVM key for both payment AND envelope signing
+            from .signer import EVMSigner
+            self._signer = EVMSigner.from_file(str(evm_private_key_path))
+            # self.keypair stays None — no Ed25519 keypair
+
+        # If keypair_path AND evm_private_key_path both provided,
+        # Ed25519 keypair signs envelopes (backward compat). EVM key
+        # is only for evm_transfer() payment.
+        if keypair_path and evm_private_key_path and signing_key is None:
+            # keypair already set above, _signer already points to it
+            pass
 
         # Fail-fast: if caller wants EVM payments, verify web3 is available now
         # rather than deferring the error to the first evm_transfer() call.
@@ -214,8 +242,19 @@ class Nukez:
     def __exit__(self, *args):
         self.close()
 
+    def _require_signer(self, operation: str):
+        """Ensure a signer is available for envelope signing."""
+        if self._signer is None:
+            raise NukezError(
+                f"{operation} requires a signing key. "
+                "Provide keypair_path, evm_private_key_path, or signing_key."
+            )
+        return self._signer
+
     def _require_keypair(self, operation: str) -> Keypair:
-        """Ensure keypair is available, with helpful error message."""
+        """Ensure keypair is available. Deprecated — use _require_signer."""
+        # Backward compat: some operations (solana_transfer, get_wallet_info)
+        # genuinely need the Ed25519 Keypair, not just any Signer.
         if not self.keypair:
             raise NukezError(
                 f"{operation} requires keypair_path. "
@@ -488,6 +527,7 @@ class Nukez:
         initial_delay: float = 2.0,
         payment_chain: Optional[str] = None,
         payment_asset: Optional[str] = None,
+        operator_pubkey: Optional[str] = None,
     ) -> Receipt:
         """
         Step 3: Confirm payment and receive storage receipt.
@@ -502,6 +542,8 @@ class Nukez:
             initial_delay: Initial delay in seconds, doubles each retry (default: 2.0)
             payment_chain: Payment chain override (e.g. "monad-testnet") — Phase 1
             payment_asset: Payment asset override (e.g. "MON") — Phase 1
+            operator_pubkey: Ed25519 base58 pubkey to bind as operator at confirm time.
+                If omitted, auto-inferred for EVM payments (0x-prefixed tx_sig).
 
         Returns:
             Receipt with:
@@ -527,6 +569,25 @@ class Nukez:
             payload["payment_chain"] = payment_chain
         if payment_asset:
             payload["payment_asset"] = payment_asset
+        # Operator delegation: explicit param takes priority, then auto-infer
+        # for EVM payments (0x-prefixed tx hash) where the Ed25519 keypair
+        # must be bound as operator since the payer uses secp256k1.
+        if operator_pubkey:
+            payload["operator_pubkey"] = operator_pubkey
+        elif (self._auto_bind_operator
+              and self.keypair
+              and isinstance(tx_sig, str)
+              and tx_sig.startswith("0x")):
+            import warnings
+            warnings.warn(
+                "Auto-binding Ed25519 operator for EVM payments is deprecated. "
+                "EVM owners can now operate directly with secp256k1 envelopes. "
+                "Pass operator_pubkey explicitly or set auto_bind_operator=False. "
+                "This behavior will be removed in pynukez 4.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            payload["operator_pubkey"] = self.keypair.pubkey_b58
         headers = {
             "Content-Type": "application/json",
             "X402-TX": tx_sig
@@ -565,6 +626,7 @@ class Nukez:
                         sig_alg=data.get("sig_alg", rcpt.get("receipt_sig_alg", "")),
                         unit_price_usd=float(rcpt.get("unit_price_usd", 0)),
                         price_usd=float(rcpt.get("price_usd", 0)),
+                        authorized_operator=rcpt.get("authorized_operator") or data.get("authorized_operator"),
                     )
                     return receipt
                 
@@ -645,7 +707,7 @@ class Nukez:
         Returns:
             NukezManifest with locker details
         """
-        keypair = self._require_keypair("provision_locker")
+        signer = self._require_signer("provision_locker")
 
         locker_id = compute_locker_id(receipt_id)
         body = {"receipt_id": receipt_id, "tags": tags or []}
@@ -653,7 +715,7 @@ class Nukez:
             body["operator_pubkey"] = operator_pubkey
         
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path="/v1/storage/signed_provision",
@@ -681,7 +743,92 @@ class Nukez:
         )
 
         return manifest
-    
+
+    # =========================================================================
+    # OPERATOR DELEGATION
+    # =========================================================================
+
+    def add_operator(self, receipt_id: str, operator_pubkey: str) -> OperatorResult:
+        """
+        Authorize an Ed25519 operator to perform file operations on this locker.
+
+        Owner-only. Max 5 operators. Cannot add self.
+
+        Args:
+            receipt_id: Receipt ID from confirm_storage()
+            operator_pubkey: Base58-encoded Ed25519 public key to authorize
+
+        Returns:
+            OperatorResult with ok=True and current operator_ids list
+
+        Raises:
+            InvalidOperatorPubkeyError: pubkey is not valid base58
+            OperatorIsOwnerError: pubkey matches the locker owner
+            OperatorConflictError: pubkey already added or max 5 reached
+            OwnerOnlyError: caller is not the locker owner
+        """
+        signer = self._require_signer("add_operator")
+        locker_id = compute_locker_id(receipt_id)
+        body = {"pubkey": operator_pubkey}
+
+        envelope = build_signed_envelope(
+            signer=signer,
+            receipt_id=receipt_id,
+            method="POST",
+            path=f"/v1/lockers/{locker_id}/operators",
+            ops=["locker:admin"],
+            body=body,
+        )
+
+        response = self.http.post(
+            f"/v1/lockers/{locker_id}/operators",
+            headers=envelope.headers,
+            data=envelope.canonical_body.encode("utf-8"),
+        )
+
+        return OperatorResult(
+            ok=response.get("ok", True),
+            operator_ids=response.get("operator_ids", []),
+        )
+
+    def remove_operator(self, receipt_id: str, operator_pubkey: str) -> OperatorResult:
+        """
+        Revoke an operator's access to this locker.
+
+        Owner-only.
+
+        Args:
+            receipt_id: Receipt ID from confirm_storage()
+            operator_pubkey: Base58-encoded Ed25519 public key to remove
+
+        Returns:
+            OperatorResult with ok=True and updated operator_ids list
+
+        Raises:
+            OperatorNotFoundError: pubkey is not in the operator list
+            OwnerOnlyError: caller is not the locker owner
+        """
+        signer = self._require_signer("remove_operator")
+        locker_id = compute_locker_id(receipt_id)
+
+        envelope = build_signed_envelope(
+            signer=signer,
+            receipt_id=receipt_id,
+            method="DELETE",
+            path=f"/v1/lockers/{locker_id}/operators/{operator_pubkey}",
+            ops=["locker:admin"],
+        )
+
+        response = self.http.delete(
+            f"/v1/lockers/{locker_id}/operators/{operator_pubkey}",
+            headers=envelope.headers,
+        )
+
+        return OperatorResult(
+            ok=response.get("ok", True),
+            operator_ids=response.get("operator_ids", []),
+        )
+
     def create_file(
         self, 
         receipt_id: str, 
@@ -706,7 +853,7 @@ class Nukez:
             - content_type: MIME type
             - expires_in_sec: URL validity duration
         """
-        keypair = self._require_keypair("create_file")
+        signer = self._require_signer("create_file")
         locker_id = compute_locker_id(receipt_id)
         
         body = {
@@ -716,7 +863,7 @@ class Nukez:
         }
         
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path=f"/v1/lockers/{locker_id}/files",
@@ -754,7 +901,7 @@ class Nukez:
         This maps to POST /v1/lockers/{locker_id}/files/batch and is the
         low-level primitive used by path-based bulk upload methods.
         """
-        keypair = self._require_keypair("create_files_batch")
+        signer = self._require_signer("create_files_batch")
         locker_id = compute_locker_id(receipt_id)
 
         if not files:
@@ -784,7 +931,7 @@ class Nukez:
         }
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path=f"/v1/lockers/{locker_id}/files/batch",
@@ -1271,7 +1418,7 @@ class Nukez:
         This maps directly to:
             POST /v1/lockers/{locker_id}/ingest/jobs
         """
-        keypair = self._require_keypair("sandbox_create_ingest_job")
+        signer = self._require_signer("sandbox_create_ingest_job")
         locker_id = compute_locker_id(receipt_id)
 
         if not files:
@@ -1315,7 +1462,7 @@ class Nukez:
         path = f"/v1/lockers/{locker_id}/ingest/jobs"
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path=path,
@@ -1341,7 +1488,7 @@ class Nukez:
         Maps to:
             POST /v1/ingest/jobs/{job_id}/files/{file_id}/parts
         """
-        keypair = self._require_keypair("sandbox_append_ingest_part")
+        signer = self._require_signer("sandbox_append_ingest_part")
 
         raw_payload = (payload_b64 or "").strip()
         if not raw_payload:
@@ -1362,7 +1509,7 @@ class Nukez:
         path = f"/v1/ingest/jobs/{job_id}/files/{file_id}/parts"
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path=path,
@@ -1384,7 +1531,7 @@ class Nukez:
         Maps to:
             POST /v1/ingest/jobs/{job_id}/complete
         """
-        keypair = self._require_keypair("sandbox_complete_ingest_job")
+        signer = self._require_signer("sandbox_complete_ingest_job")
 
         body: Dict[str, Any] = {}
         if file_ids:
@@ -1392,7 +1539,7 @@ class Nukez:
 
         path = f"/v1/ingest/jobs/{job_id}/complete"
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path=path,
@@ -1754,11 +1901,11 @@ class Nukez:
         Returns:
             List of FileInfo objects
         """
-        keypair = self._require_keypair("list_files")
+        signer = self._require_signer("list_files")
         locker_id = compute_locker_id(receipt_id)
         
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="GET",
             path=f"/v1/lockers/{locker_id}/files",
@@ -1802,11 +1949,11 @@ class Nukez:
         Returns:
             FileUrls with refreshed signed URLs
         """
-        keypair = self._require_keypair("get_file_urls")
+        signer = self._require_signer("get_file_urls")
         locker_id = compute_locker_id(receipt_id)
         
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="GET",
             path=f"/v1/lockers/{locker_id}/files/{filename}",
@@ -2443,11 +2590,11 @@ class Nukez:
         Returns:
             DeleteResult with deletion confirmation
         """
-        keypair = self._require_keypair("delete_file")
+        signer = self._require_signer("delete_file")
         locker_id = compute_locker_id(receipt_id)
         
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="DELETE",
             path=f"/v1/lockers/{locker_id}/files/{filename}",
@@ -2467,11 +2614,11 @@ class Nukez:
     
     def get_manifest(self, receipt_id: str) -> dict:
         """Full locker state in one call — all files, hashes, metadata."""
-        keypair = self._require_keypair("get_manifest")
+        signer = self._require_signer("get_manifest")
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="GET",
             path=f"/v1/lockers/{locker_id}/manifest",
@@ -2881,7 +3028,7 @@ class Nukez:
         Returns:
             Raw response dict with 'urls' list, 'found', 'not_found'.
         """
-        keypair = self._require_keypair("get_batch_urls")
+        signer = self._require_signer("get_batch_urls")
         locker_id = compute_locker_id(receipt_id)
 
         body = {
@@ -2890,7 +3037,7 @@ class Nukez:
         }
 
         envelope = build_signed_envelope(
-            keypair=keypair,
+            signer=signer,
             receipt_id=receipt_id,
             method="POST",
             path=f"/v1/lockers/{locker_id}/files/urls",
