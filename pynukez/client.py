@@ -13,11 +13,14 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import threading
 import time
 import uuid
+
+logger = logging.getLogger("pynukez.client")
 import httpx as _httpx
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Any, Callable
@@ -137,7 +140,7 @@ class Nukez:
     def __init__(
         self,
         keypair_path: Optional[Union[str, Path]] = None,
-        base_url: str = "https://api.nukez.xyz",
+        base_url: str = os.environ.get("NUKEZ_BASE_URL", "https://api.nukez.xyz"),
         network: str = "devnet",
         rpc_url: Optional[str] = "https://api.devnet.solana.com",
         timeout: int = None,
@@ -206,6 +209,10 @@ class Nukez:
 
         if signing_key is not None:
             self._signer = signing_key
+            # Still initialize keypair for payment operations (solana_transfer)
+            # even when an external signing_key is provided for envelope signing.
+            if keypair_path:
+                self.keypair = Keypair(keypair_path)
         elif keypair_path:
             self.keypair = Keypair(keypair_path)
             self._signer = self.keypair
@@ -241,6 +248,10 @@ class Nukez:
         # Used by _is_delegating() to decide whether the signer field
         # must appear in the envelope (operator delegation).
         self._owner_cache: Dict[str, str] = {}
+        # Maps receipt_id → sig_alg ("secp256k1" or "ed25519").
+        # Populated by confirm_storage(). Used by _signer_for_receipt()
+        # to auto-select the correct signing key for dual-key clients.
+        self._sig_alg_cache: Dict[str, str] = {}
 
         # Lazy-initialized payment handlers
         self._payment = None
@@ -248,6 +259,13 @@ class Nukez:
         self._evm_private_key_path = evm_private_key_path
         self._evm_rpc_url = evm_rpc_url
         self._evm_payment = None
+
+        # Store both signers for dual-key clients (EVM + Ed25519).
+        # _signer is the default; _evm_signer is the EVM-specific one.
+        self._evm_signer = None
+        if keypair_path and evm_private_key_path and signing_key is None:
+            from .signer import EVMSigner
+            self._evm_signer = EVMSigner.from_file(str(evm_private_key_path))
         self._upload_jobs: Dict[str, Dict[str, Any]] = {}
         self._upload_jobs_lock = threading.Lock()
 
@@ -262,13 +280,27 @@ class Nukez:
     def __exit__(self, *args):
         self.close()
 
-    def _require_signer(self, operation: str):
-        """Ensure a signer is available for envelope signing."""
+    def _require_signer(self, operation: str, receipt_id: str = ""):
+        """
+        Ensure a signer is available for envelope signing.
+
+        For dual-key clients (both keypair_path and evm_private_key_path),
+        auto-selects the correct signer based on the receipt's sig_alg:
+          - EVM-paid receipt (secp256k1) → use EVM signer
+          - Solana-paid receipt (ed25519) → use Ed25519 signer
+          - Unknown receipt → use default signer
+        """
         if self._signer is None:
             raise NukezError(
                 f"{operation} requires a signing key. "
                 "Provide keypair_path, evm_private_key_path, or signing_key."
             )
+        # Dual-key auto-select: if we have both signers and know the receipt's chain
+        if receipt_id and self._evm_signer:
+            alg = self._sig_alg_cache.get(receipt_id, "")
+            if alg == "secp256k1":
+                return self._evm_signer
+            # ed25519 or unknown → default signer (Ed25519 keypair)
         return self._signer
 
     def _is_delegating(self, receipt_id: str) -> bool:
@@ -290,6 +322,30 @@ class Nukez:
             # Unknown owner — assume delegation (safe default).
             return True
         return self._signer.identity != owner
+
+    def set_owner(self, receipt_id: str, identity: Optional[str] = None) -> None:
+        """Pre-seed the owner cache so ``_is_delegating()`` returns False.
+
+        Call this when you are the locker owner but haven't gone through
+        ``confirm_storage()`` or ``provision_locker()`` in this process —
+        e.g. a fresh client that already has a receipt_id.
+
+        Args:
+            receipt_id: The receipt/locker identifier.
+            identity: Owner identity string.  Defaults to the current
+                signer's identity (i.e. "I am the owner").
+
+        Raises:
+            NukezError: If no signer is configured and identity is not provided.
+        """
+        if identity is None:
+            if self._signer is None:
+                raise NukezError(
+                    "set_owner() requires either an explicit identity "
+                    "or a configured signer."
+                )
+            identity = self._signer.identity
+        self._owner_cache[receipt_id] = identity
 
     def _require_keypair(self, operation: str) -> Keypair:
         """Ensure keypair is available. Deprecated — use _require_signer."""
@@ -401,6 +457,14 @@ class Nukez:
             This endpoint returns HTTP 402 Payment Required - this is expected behavior,
             not an error. The response contains the payment instructions.
         """
+        # Auto-detect EVM defaults when client has an EVM key configured
+        if not pay_network and self._evm_private_key_path:
+            pay_network = "monad-testnet"
+        if not pay_asset and pay_network and pay_network.lower() in (
+            "monad-testnet", "monad", "eip155:10143",
+        ):
+            pay_asset = "MON"
+
         try:
             body = {"units": units}
             if provider:
@@ -438,6 +502,41 @@ class Nukez:
                 terms=e.terms,
                 price_breakdown=e.details.get("price_breakdown"),
             )
+
+            # If the caller requested a specific chain/asset, override the
+            # top-level fields with the matching payment option so that
+            # the StorageRequest reflects the correct pay_to_address,
+            # amount, etc.  The _http layer defaults to Solana, which
+            # causes confirm_storage to verify against the wrong treasury.
+            if pay_asset and request.payment_options:
+                _net_hint = (pay_network or "").lower()
+                for opt in request.payment_options:
+                    if opt.get("pay_asset", "").upper() != pay_asset.upper():
+                        continue
+                    # If a network hint was given, also match on it
+                    if _net_hint and _net_hint not in opt.get("network", "").lower():
+                        continue
+                    # Found matching option — override top-level fields
+                    request.pay_to_address = opt["pay_to_address"]
+                    request.pay_asset = opt["pay_asset"]
+                    raw_net = opt.get("network", "")
+                    if raw_net.startswith("eip155:"):
+                        request.network = pay_network or "monad-testnet"
+                    elif raw_net.startswith("solana:"):
+                        request.network = "solana-devnet"
+                    else:
+                        request.network = raw_net
+                    request.amount = opt.get("amount")
+                    request.amount_raw = int(opt["amount"]) if opt.get("amount") else None
+                    request.token_address = opt.get("asset_contract") if opt.get("asset_contract") not in (None, "native") else None
+                    request.token_decimals = opt.get("decimals")
+                    if opt.get("human_amount"):
+                        try:
+                            request.amount_sol = float(opt["human_amount"])
+                        except (ValueError, TypeError):
+                            pass
+                    break
+
             return request
     
     def solana_transfer(
@@ -630,8 +729,18 @@ class Nukez:
             payload["operator_pubkey"] = self.keypair.pubkey_b58
         headers = {
             "Content-Type": "application/json",
-            "X402-TX": tx_sig
+            "X402-TX": tx_sig,
         }
+        # Also send as x402 headers (belt-and-suspenders with body fields).
+        # Map user-friendly chain names to x402 network identifiers.
+        _chain_to_x402 = {
+            "monad-testnet": "eip155:10143",
+            "monad-mainnet": "eip155:10143",
+        }
+        if payment_chain:
+            headers["X-Payment-Chain"] = _chain_to_x402.get(payment_chain, payment_chain)
+        if payment_asset:
+            headers["X-Payment-Asset"] = payment_asset
         
         last_error: Optional[Exception] = None
         
@@ -670,6 +779,9 @@ class Nukez:
                     )
                     # Cache owner identity for _is_delegating() lookups.
                     self._owner_cache[data["receipt_id"]] = receipt.payer_pubkey
+                    # Cache sig_alg for dual-key signer auto-selection.
+                    if receipt.sig_alg:
+                        self._sig_alg_cache[data["receipt_id"]] = receipt.sig_alg
                     return receipt
                 
                 # 402 from confirm endpoint - check if it's tx_not_found
@@ -678,39 +790,63 @@ class Nukez:
                         body = resp.json()
                     except:
                         body = {"raw": resp.text}
-                    
+
                     # Check for tx_not_found in various response formats
                     # Format 1: details.verify.err
                     verify_info = (body.get("details") or {}).get("verify") or {}
                     err = verify_info.get("err", "")
-                    
+
                     # Format 2: error_code at top level
                     error_code = body.get("error_code", "")
-                    
+
                     # Format 3: message contains tx_not_found
                     message = body.get("message", "")
-                    
+                    msg_lower = message.lower()
+
                     is_tx_not_found = (
                         err == "tx_not_found" or
                         error_code == "TX_NOT_FOUND" or
-                        "tx_not_found" in message.lower() or
-                        "transaction" in message.lower() and "not found" in message.lower()
+                        "tx_not_found" in msg_lower or
+                        ("transaction" in msg_lower and "not found" in msg_lower)
                     )
-                    
-                    if is_tx_not_found and attempt < max_retries - 1:
+
+                    # EVM chains may return generic failures while the tx
+                    # is still propagating / finalising.  Treat these as
+                    # retryable when there is no specific error code that
+                    # indicates a permanent failure.
+                    _permanent_codes = {
+                        "AMOUNT_MISMATCH", "WRONG_RECIPIENT",
+                        "QUOTE_EXPIRED", "DUPLICATE_CONFIRM",
+                        "INVALID_PAY_REQ", "PAYMENT_VERIFICATION_FAILED",
+                    }
+                    is_retryable_402 = (
+                        is_tx_not_found
+                        or (
+                            error_code not in _permanent_codes
+                            and msg_lower in ("", "request failed", "verification failed")
+                        )
+                    )
+
+                    if is_retryable_402 and attempt < max_retries - 1:
                         delay = initial_delay * (2 ** attempt)
-                        print(f"[pynukez] Transaction not found, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                        reason = "tx not found" if is_tx_not_found else f"retryable 402 ({message or error_code or 'no detail'})"
+                        logger.debug("%s, retrying in %ss (attempt %d/%d)", reason, delay, attempt + 1, max_retries)
                         time.sleep(delay)
                         continue
-                    
-                    # Not tx_not_found or out of retries
-                    last_error = TransactionNotFoundError(
-                        tx_sig=tx_sig,
-                        suggested_delay=int(initial_delay * (2 ** attempt))
-                    ) if is_tx_not_found else NukezError(
-                        f"Payment confirmation failed: {body.get('message', resp.text)}",
-                        details=body
-                    )
+
+                    # Out of retries or permanent failure
+                    if is_tx_not_found:
+                        last_error = TransactionNotFoundError(
+                            tx_sig=tx_sig,
+                            suggested_delay=int(initial_delay * (2 ** attempt))
+                        )
+                    else:
+                        detail_str = json.dumps(body, indent=2) if body else resp.text
+                        last_error = NukezError(
+                            f"Payment confirmation failed: {message or resp.text}\n"
+                            f"Server response: {detail_str}",
+                            details=body
+                        )
                     raise last_error
                 
                 # Other error status
@@ -749,7 +885,7 @@ class Nukez:
         Returns:
             NukezManifest with locker details
         """
-        signer = self._require_signer("provision_locker")
+        signer = self._require_signer("provision_locker", receipt_id)
 
         locker_id = compute_locker_id(receipt_id)
         body = {"receipt_id": receipt_id, "tags": tags or []}
@@ -812,7 +948,7 @@ class Nukez:
             OperatorConflictError: pubkey already added or max 5 reached
             OwnerOnlyError: caller is not the locker owner
         """
-        signer = self._require_signer("add_operator")
+        signer = self._require_signer("add_operator", receipt_id)
         locker_id = compute_locker_id(receipt_id)
         body = {"pubkey": operator_pubkey}
 
@@ -853,7 +989,7 @@ class Nukez:
             OperatorNotFoundError: pubkey is not in the operator list
             OwnerOnlyError: caller is not the locker owner
         """
-        signer = self._require_signer("remove_operator")
+        signer = self._require_signer("remove_operator", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
@@ -898,7 +1034,7 @@ class Nukez:
             - content_type: MIME type
             - expires_in_sec: URL validity duration
         """
-        signer = self._require_signer("create_file")
+        signer = self._require_signer("create_file", receipt_id)
         locker_id = compute_locker_id(receipt_id)
         
         body = {
@@ -947,7 +1083,7 @@ class Nukez:
         This maps to POST /v1/lockers/{locker_id}/files/batch and is the
         low-level primitive used by path-based bulk upload methods.
         """
-        signer = self._require_signer("create_files_batch")
+        signer = self._require_signer("create_files_batch", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         if not files:
@@ -1465,7 +1601,7 @@ class Nukez:
         This maps directly to:
             POST /v1/lockers/{locker_id}/ingest/jobs
         """
-        signer = self._require_signer("sandbox_create_ingest_job")
+        signer = self._require_signer("sandbox_create_ingest_job", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         if not files:
@@ -1536,7 +1672,7 @@ class Nukez:
         Maps to:
             POST /v1/ingest/jobs/{job_id}/files/{file_id}/parts
         """
-        signer = self._require_signer("sandbox_append_ingest_part")
+        signer = self._require_signer("sandbox_append_ingest_part", receipt_id)
 
         raw_payload = (payload_b64 or "").strip()
         if not raw_payload:
@@ -1580,7 +1716,7 @@ class Nukez:
         Maps to:
             POST /v1/ingest/jobs/{job_id}/complete
         """
-        signer = self._require_signer("sandbox_complete_ingest_job")
+        signer = self._require_signer("sandbox_complete_ingest_job", receipt_id)
 
         body: Dict[str, Any] = {}
         if file_ids:
@@ -1882,9 +2018,9 @@ class Nukez:
         for attempt in range(max_attempts):
             if attempt > 0:
                 delay = initial_delay * (2 ** (attempt - 1))
-                print(
-                    f"[pynukez] Download returned 404, retrying in {delay}s "
-                    f"(attempt {attempt}/{max_retries})"
+                logger.debug(
+                    "Download returned 404, retrying in %ss (attempt %d/%d)",
+                    delay, attempt, max_retries,
                 )
                 time.sleep(delay)
 
@@ -1951,7 +2087,7 @@ class Nukez:
         Returns:
             List of FileInfo objects
         """
-        signer = self._require_signer("list_files")
+        signer = self._require_signer("list_files", receipt_id)
         locker_id = compute_locker_id(receipt_id)
         
         envelope = build_signed_envelope(
@@ -2000,7 +2136,7 @@ class Nukez:
         Returns:
             FileUrls with refreshed signed URLs
         """
-        signer = self._require_signer("get_file_urls")
+        signer = self._require_signer("get_file_urls", receipt_id)
         locker_id = compute_locker_id(receipt_id)
         
         envelope = build_signed_envelope(
@@ -2642,7 +2778,7 @@ class Nukez:
         Returns:
             DeleteResult with deletion confirmation
         """
-        signer = self._require_signer("delete_file")
+        signer = self._require_signer("delete_file", receipt_id)
         locker_id = compute_locker_id(receipt_id)
         
         envelope = build_signed_envelope(
@@ -2667,7 +2803,7 @@ class Nukez:
     
     def get_manifest(self, receipt_id: str) -> dict:
         """Full locker state in one call — all files, hashes, metadata."""
-        signer = self._require_signer("get_manifest")
+        signer = self._require_signer("get_manifest", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
@@ -3082,7 +3218,7 @@ class Nukez:
         Returns:
             Raw response dict with 'urls' list, 'found', 'not_found'.
         """
-        signer = self._require_signer("get_batch_urls")
+        signer = self._require_signer("get_batch_urls", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         body = {

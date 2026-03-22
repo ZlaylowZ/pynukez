@@ -233,3 +233,88 @@ class TestAsyncBatchOperations:
         result = await async_client.upload_files("receipt_123", files, workers=2)
         assert result.total == 1
         assert result.uploaded >= 0  # May be 0 or 1 depending on implementation details
+
+
+class TestAsyncKeypairDualInit:
+    """Keypair is still initialized when signing_key is injected."""
+
+    @patch("pynukez._async_client.Keypair")
+    def test_keypair_initialized_with_signing_key(self, mock_kp):
+        mock_signer = MagicMock()
+        mock_signer.identity = "external-signer-id"
+        mock_signer.sig_alg = "ed25519"
+        client = AsyncNukez(
+            keypair_path="~/.config/solana/id.json",
+            signing_key=mock_signer,
+        )
+        assert client._signer is mock_signer
+        mock_kp.assert_called_once_with("~/.config/solana/id.json")
+        assert client.keypair is mock_kp.return_value
+
+    @patch("pynukez._async_client.Keypair")
+    def test_keypair_none_without_keypair_path(self, mock_kp):
+        mock_signer = MagicMock()
+        mock_signer.identity = "external-signer-id"
+        mock_signer.sig_alg = "ed25519"
+        client = AsyncNukez(signing_key=mock_signer)
+        assert client._signer is mock_signer
+        assert client.keypair is None
+
+
+class TestAsyncSetOwner:
+    """set_owner() pre-seeds the owner cache."""
+
+    @patch("pynukez._async_client.Keypair")
+    def test_set_owner_uses_signer_identity(self, mock_kp):
+        mock_kp.return_value.identity = "owner-pubkey"
+        mock_kp.return_value.sig_alg = "ed25519"
+        mock_kp.return_value.sign.return_value = "sig"
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        client.set_owner("receipt-123")
+        assert client._owner_cache["receipt-123"] == "owner-pubkey"
+        assert client._is_delegating("receipt-123") is False
+
+    @patch("pynukez._async_client.Keypair")
+    def test_set_owner_explicit_identity(self, mock_kp):
+        mock_kp.return_value.identity = "different-pubkey"
+        mock_kp.return_value.sig_alg = "ed25519"
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        client.set_owner("receipt-123", identity="explicit-owner")
+        assert client._owner_cache["receipt-123"] == "explicit-owner"
+
+    def test_set_owner_no_signer_raises(self):
+        client = AsyncNukez()
+        with pytest.raises(NukezError, match="requires either an explicit identity"):
+            client.set_owner("receipt-123")
+
+    def test_set_owner_no_signer_with_explicit_identity(self):
+        client = AsyncNukez()
+        client.set_owner("receipt-123", identity="some-owner")
+        assert client._owner_cache["receipt-123"] == "some-owner"
+
+
+class TestAsyncDualSignerParity:
+    """Async client has dual-signer auto-selection like sync."""
+
+    @patch("pynukez._async_client.Keypair")
+    def test_require_signer_returns_default(self, mock_kp):
+        mock_kp.return_value.identity = "ed25519-key"
+        mock_kp.return_value.sig_alg = "ed25519"
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        signer = client._require_signer("test", "some-receipt")
+        assert signer is client._signer
+
+    @patch("pynukez._async_client.Keypair")
+    def test_evm_signer_not_initialized_without_both_paths(self, mock_kp):
+        mock_kp.return_value.identity = "ed25519-key"
+        mock_kp.return_value.sig_alg = "ed25519"
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        assert client._evm_signer is None
+
+    @patch("pynukez._async_client.Keypair")
+    def test_sig_alg_cache_initialized(self, mock_kp):
+        mock_kp.return_value.identity = "ed25519-key"
+        mock_kp.return_value.sig_alg = "ed25519"
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        assert isinstance(client._sig_alg_cache, dict)
+        assert len(client._sig_alg_cache) == 0

@@ -22,11 +22,14 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import re
 import time
 import uuid
+
+logger = logging.getLogger("pynukez.async_client")
 import httpx as _httpx
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Any, Callable
@@ -118,7 +121,7 @@ class AsyncNukez:
     def __init__(
         self,
         keypair_path: Optional[Union[str, Path]] = None,
-        base_url: str = "https://api.nukez.xyz",
+        base_url: str = os.environ.get("NUKEZ_BASE_URL", "https://api.nukez.xyz"),
         network: str = "devnet",
         rpc_url: Optional[str] = "https://api.devnet.solana.com",
         timeout: int = None,
@@ -156,6 +159,10 @@ class AsyncNukez:
 
         if signing_key is not None:
             self._signer = signing_key
+            # Still initialize keypair for payment operations (solana_transfer)
+            # even when an external signing_key is provided for envelope signing.
+            if keypair_path:
+                self.keypair = Keypair(keypair_path)
         elif keypair_path:
             self.keypair = Keypair(keypair_path)
             self._signer = self.keypair
@@ -167,6 +174,7 @@ class AsyncNukez:
             pass  # Ed25519 keypair signs envelopes (backward compat)
 
         # Fail-fast: if caller wants EVM payments, verify web3 is available now
+        # (before the dual-signer init below, so the import is validated early)
         if evm_private_key_path:
             try:
                 from .evm_payment import HAS_WEB3
@@ -184,6 +192,10 @@ class AsyncNukez:
         # Used by _is_delegating() to decide whether the signer field
         # must appear in the envelope (operator delegation).
         self._owner_cache: Dict[str, str] = {}
+        # Maps receipt_id → sig_alg ("secp256k1" or "ed25519").
+        # Populated by confirm_storage(). Used by _require_signer()
+        # to auto-select the correct signing key for dual-key clients.
+        self._sig_alg_cache: Dict[str, str] = {}
 
         # Lazy-initialized payment handlers
         self._payment = None
@@ -191,6 +203,13 @@ class AsyncNukez:
         self._evm_private_key_path = evm_private_key_path
         self._evm_rpc_url = evm_rpc_url
         self._evm_payment = None
+
+        # Store both signers for dual-key clients (EVM + Ed25519).
+        # _signer is the default; _evm_signer is the EVM-specific one.
+        self._evm_signer = None
+        if keypair_path and evm_private_key_path and signing_key is None:
+            from .signer import EVMSigner
+            self._evm_signer = EVMSigner.from_file(str(evm_private_key_path))
         self._upload_jobs: Dict[str, Dict[str, Any]] = {}
         self._upload_jobs_lock = asyncio.Lock()
 
@@ -213,13 +232,27 @@ class AsyncNukez:
     # Internal helpers (pure computation, sync)
     # ------------------------------------------------------------------
 
-    def _require_signer(self, operation: str):
-        """Ensure a signer is available for envelope signing."""
+    def _require_signer(self, operation: str, receipt_id: str = ""):
+        """
+        Ensure a signer is available for envelope signing.
+
+        For dual-key clients (both keypair_path and evm_private_key_path),
+        auto-selects the correct signer based on the receipt's sig_alg:
+          - EVM-paid receipt (secp256k1) → use EVM signer
+          - Solana-paid receipt (ed25519) → use Ed25519 signer
+          - Unknown receipt → use default signer
+        """
         if self._signer is None:
             raise NukezError(
                 f"{operation} requires a signing key. "
                 "Provide keypair_path, evm_private_key_path, or signing_key."
             )
+        # Dual-key auto-select: if we have both signers and know the receipt's chain
+        if receipt_id and self._evm_signer:
+            alg = self._sig_alg_cache.get(receipt_id, "")
+            if alg == "secp256k1":
+                return self._evm_signer
+            # ed25519 or unknown → default signer (Ed25519 keypair)
         return self._signer
 
     def _is_delegating(self, receipt_id: str) -> bool:
@@ -240,6 +273,30 @@ class AsyncNukez:
             # Unknown owner — assume delegation (safe default).
             return True
         return self._signer.identity != owner
+
+    def set_owner(self, receipt_id: str, identity: Optional[str] = None) -> None:
+        """Pre-seed the owner cache so ``_is_delegating()`` returns False.
+
+        Call this when you are the locker owner but haven't gone through
+        ``confirm_storage()`` or ``provision_locker()`` in this process —
+        e.g. a fresh client that already has a receipt_id.
+
+        Args:
+            receipt_id: The receipt/locker identifier.
+            identity: Owner identity string.  Defaults to the current
+                signer's identity (i.e. "I am the owner").
+
+        Raises:
+            NukezError: If no signer is configured and identity is not provided.
+        """
+        if identity is None:
+            if self._signer is None:
+                raise NukezError(
+                    "set_owner() requires either an explicit identity "
+                    "or a configured signer."
+                )
+            identity = self._signer.identity
+        self._owner_cache[receipt_id] = identity
 
     def _require_keypair(self, operation: str) -> Keypair:
         """Ensure keypair is available. Deprecated — use _require_signer."""
@@ -640,6 +697,9 @@ class AsyncNukez:
                     )
                     # Cache owner identity for _is_delegating() lookups.
                     self._owner_cache[data["receipt_id"]] = receipt.payer_pubkey
+                    # Cache sig_alg for dual-key signer auto-selection.
+                    if receipt.sig_alg:
+                        self._sig_alg_cache[data["receipt_id"]] = receipt.sig_alg
                     return receipt
 
                 if resp.status_code == 402:
@@ -662,7 +722,7 @@ class AsyncNukez:
 
                     if is_tx_not_found and attempt < max_retries - 1:
                         delay = initial_delay * (2 ** attempt)
-                        print(f"[pynukez] Transaction not found, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                        logger.debug("Transaction not found, retrying in %ss (attempt %d/%d)", delay, attempt + 1, max_retries)
                         await asyncio.sleep(delay)
                         continue
 
@@ -699,7 +759,7 @@ class AsyncNukez:
         operator_pubkey: Optional[str] = None,
     ) -> NukezManifest:
         """Create storage locker namespace for files."""
-        signer = self._require_signer("provision_locker")
+        signer = self._require_signer("provision_locker", receipt_id)
         locker_id = compute_locker_id(receipt_id)
         body = {"receipt_id": receipt_id, "tags": tags or []}
         if operator_pubkey:
@@ -755,7 +815,7 @@ class AsyncNukez:
         Returns:
             OperatorResult with ok=True and current operator_ids list
         """
-        signer = self._require_signer("add_operator")
+        signer = self._require_signer("add_operator", receipt_id)
         locker_id = compute_locker_id(receipt_id)
         body = {"pubkey": operator_pubkey}
 
@@ -792,7 +852,7 @@ class AsyncNukez:
         Returns:
             OperatorResult with ok=True and updated operator_ids list
         """
-        signer = self._require_signer("remove_operator")
+        signer = self._require_signer("remove_operator", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
@@ -821,7 +881,7 @@ class AsyncNukez:
         ttl_min: int = 30,
     ) -> FileUrls:
         """Create a new file and get upload/download URLs."""
-        signer = self._require_signer("create_file")
+        signer = self._require_signer("create_file", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         body = {
@@ -861,7 +921,7 @@ class AsyncNukez:
         ttl_min: int = 30,
     ) -> Dict[str, Any]:
         """Create multiple file entries and mint upload/download URLs in one call."""
-        signer = self._require_signer("create_files_batch")
+        signer = self._require_signer("create_files_batch", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         if not files:
@@ -1305,7 +1365,7 @@ class AsyncNukez:
         execution_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a sandbox-ingest job."""
-        signer = self._require_signer("sandbox_create_ingest_job")
+        signer = self._require_signer("sandbox_create_ingest_job", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         if not files:
@@ -1371,7 +1431,7 @@ class AsyncNukez:
         is_last: bool = False,
     ) -> Dict[str, Any]:
         """Append one base64 chunk into a sandbox-ingest job file."""
-        signer = self._require_signer("sandbox_append_ingest_part")
+        signer = self._require_signer("sandbox_append_ingest_part", receipt_id)
 
         raw_payload = (payload_b64 or "").strip()
         if not raw_payload:
@@ -1410,7 +1470,7 @@ class AsyncNukez:
         file_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Finalize a sandbox-ingest job."""
-        signer = self._require_signer("sandbox_complete_ingest_job")
+        signer = self._require_signer("sandbox_complete_ingest_job", receipt_id)
 
         body: Dict[str, Any] = {}
         if file_ids:
@@ -1644,9 +1704,9 @@ class AsyncNukez:
         for attempt in range(max_attempts):
             if attempt > 0:
                 delay = initial_delay * (2 ** (attempt - 1))
-                print(
-                    f"[pynukez] Download returned 404, retrying in {delay}s "
-                    f"(attempt {attempt}/{max_retries})"
+                logger.debug(
+                    "Download returned 404, retrying in %ss (attempt %d/%d)",
+                    delay, attempt, max_retries,
                 )
                 await asyncio.sleep(delay)
 
@@ -1704,7 +1764,7 @@ class AsyncNukez:
 
     async def list_files(self, receipt_id: str) -> List[FileInfo]:
         """List all files in locker."""
-        signer = self._require_signer("list_files")
+        signer = self._require_signer("list_files", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
@@ -1743,7 +1803,7 @@ class AsyncNukez:
         ttl_min: int = 30,
     ) -> FileUrls:
         """Get fresh upload/download URLs for existing file."""
-        signer = self._require_signer("get_file_urls")
+        signer = self._require_signer("get_file_urls", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
@@ -1770,7 +1830,7 @@ class AsyncNukez:
 
     async def delete_file(self, receipt_id: str, filename: str) -> DeleteResult:
         """Delete file from locker."""
-        signer = self._require_signer("delete_file")
+        signer = self._require_signer("delete_file", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
@@ -1795,7 +1855,7 @@ class AsyncNukez:
 
     async def get_manifest(self, receipt_id: str) -> dict:
         """Full locker state in one call."""
-        signer = self._require_signer("get_manifest")
+        signer = self._require_signer("get_manifest", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
@@ -1991,7 +2051,7 @@ class AsyncNukez:
         ttl_min: int = 30,
     ) -> dict:
         """Get signed download URLs for multiple files in one API call."""
-        signer = self._require_signer("get_batch_urls")
+        signer = self._require_signer("get_batch_urls", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         body = {
