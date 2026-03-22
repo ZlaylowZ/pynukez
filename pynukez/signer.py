@@ -48,6 +48,11 @@ class Signer(Protocol):
         secp256k1 -> 0x-prefixed hex-encoded signature string.
 
         The caller places this directly into the X-Nukez-Signature header.
+
+        IMPORTANT: This method MUST be synchronous.
+        ``build_signed_envelope`` calls it in a sync context.
+        Consumers with async signing backends should bridge to sync
+        before injecting a Signer.
         """
         ...
 

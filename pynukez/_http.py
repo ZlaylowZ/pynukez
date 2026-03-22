@@ -10,8 +10,11 @@ Provides both sync (HTTPClient) and shared error-handling functions
 used by AsyncHTTPClient in _async_http.py.
 """
 
+import logging
 import httpx
 from typing import Dict, Any, Optional
+
+logger = logging.getLogger("pynukez.http")
 
 from .errors import (
     NukezError,
@@ -85,9 +88,8 @@ def parse_error_response(response) -> dict:
             data = response.json()
             return data if isinstance(data, dict) else {}
     except (ValueError, TypeError) as e:
-        import sys
-        print(f"[nukez] WARNING: Failed to parse response JSON: {e}", file=sys.stderr)
-        print(f"[nukez] Response content: {response.content[:500]}", file=sys.stderr)
+        logger.warning("Failed to parse response JSON: %s", e)
+        logger.debug("Response content: %s", response.content[:500])
     return {}
 
 
@@ -269,10 +271,9 @@ def handle_error_response(response) -> None:
 
         # Debug logging if fields are missing
         if not pay_req_id or not pay_to_address:
-            import sys
-            print(f"[nukez] WARNING: 402 response missing expected fields", file=sys.stderr)
-            print(f"[nukez] Response keys: {list(error_details.keys())}", file=sys.stderr)
-            print(f"[nukez] pay_req_id={pay_req_id!r}, pay_to_address={pay_to_address!r}", file=sys.stderr)
+            logger.warning("402 response missing expected fields")
+            logger.debug("Response keys: %s", list(error_details.keys()))
+            logger.debug("pay_req_id=%r, pay_to_address=%r", pay_req_id, pay_to_address)
 
         err = PaymentRequiredError(
             pay_req_id=str(pay_req_id) if pay_req_id else "",
