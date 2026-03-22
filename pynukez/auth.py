@@ -35,12 +35,26 @@ from .errors import NukezError
 
 
 @dataclass
+class UnsignedEnvelope:
+    """Result from build_unsigned_envelope().
+
+    Contains everything needed for an external signer (relay, HSM, etc.)
+    to produce a signature and complete the envelope.
+    """
+    envelope: Dict[str, Union[str, int, List[str]]]  # raw envelope dict
+    envelope_json: str        # canonical JSON (what must be signed)
+    envelope_b64: str         # base64url-encoded envelope (for X-Nukez-Envelope header)
+    canonical_body: Optional[str]
+    locker_id: str
+
+
+@dataclass
 class SignedEnvelope:
     """Result from build_signed_envelope()."""
     headers: Dict[str, str]  # X-Nukez-Envelope, X-Nukez-Signature
     canonical_body: Optional[str]
     locker_id: str
-    
+
     # Include what agent needs to know
     usage: str = "Add headers to your HTTP request"
 
@@ -301,4 +315,131 @@ def build_signed_envelope(
         headers=headers,
         canonical_body=canonical_body,
         locker_id=locker_id
+    )
+
+
+def build_unsigned_envelope(
+    signer_identity: str,
+    sig_alg: str,
+    receipt_id: str = "",
+    method: str = "",
+    path: str = "",
+    ops: List[str] = None,
+    body: Optional[Union[Dict, str]] = None,
+    ttl_seconds: int = 300,
+    delegating: bool = False,
+) -> UnsignedEnvelope:
+    """
+    Build an unsigned envelope for external/relay signing.
+
+    Constructs the same canonical envelope as build_signed_envelope but
+    does NOT sign it.  The caller is responsible for obtaining a signature
+    (via a relay, HSM, or multi-party protocol) and attaching it with
+    attach_signature().
+
+    Args:
+        signer_identity: Public identifier of the signer (base58 pubkey
+            or 0x address).
+        sig_alg: Signature algorithm ("ed25519" or "secp256k1").
+        receipt_id: Receipt ID from confirm_storage().
+        method: HTTP method (GET, POST, PUT, DELETE).
+        path: API path (e.g., "/v1/lockers/{id}/files").
+        ops: Required operations (e.g., ["locker:write"]).
+        body: Request body dict for POST/PUT (will be canonicalized).
+        ttl_seconds: Envelope validity duration (default 5 minutes).
+        delegating: If True, include signer identity in the envelope
+            (operator acting on behalf of owner).
+
+    Returns:
+        UnsignedEnvelope with envelope dict, canonical JSON, base64url
+        encoding, canonical body, and locker_id.
+
+    Raises:
+        NukezError: If body missing for POST/PUT
+    """
+    if ops is None:
+        ops = []
+
+    locker_id = compute_locker_id(receipt_id)
+
+    # Handle body — same canonicalization as build_signed_envelope
+    canonical_body = None
+    body_sha256 = None
+
+    if body is not None:
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+            except json.JSONDecodeError:
+                raise NukezError(
+                    "build_unsigned_envelope: 'body' must be valid JSON if provided as string. "
+                    f"Received: {body[:100]}..."
+                )
+        canonical_body = json.dumps(body, separators=(',', ':'), sort_keys=True)
+        body_sha256 = hashlib.sha256(canonical_body.encode('utf-8')).hexdigest()
+
+    if method.upper() in ('POST', 'PUT') and canonical_body is None:
+        raise NukezError(
+            f"build_unsigned_envelope: 'body' parameter is REQUIRED for {method} requests. "
+            "The server verifies the signature covers the request body. "
+            "Pass body={} for empty body if needed."
+        )
+
+    if method.upper() in ('GET', 'DELETE'):
+        body_sha256 = hashlib.sha256(b'').hexdigest()
+
+    now = int(time.time())
+
+    envelope = {
+        "v": 1,
+        "locker_id": locker_id,
+        "receipt_id": receipt_id,
+        "nonce": os.urandom(16).hex(),
+        "iat": now,
+        "exp": now + ttl_seconds,
+        "ops": ops,
+        "method": method.upper(),
+        "path": path,
+        "body_sha256": body_sha256,
+        "sig_alg": sig_alg,
+    }
+
+    if delegating:
+        envelope["signer"] = signer_identity
+
+    envelope_json = json.dumps(envelope, separators=(',', ':'), sort_keys=True)
+    envelope_b64 = base64.urlsafe_b64encode(
+        envelope_json.encode('utf-8')
+    ).decode().rstrip('=')
+
+    return UnsignedEnvelope(
+        envelope=envelope,
+        envelope_json=envelope_json,
+        envelope_b64=envelope_b64,
+        canonical_body=canonical_body,
+        locker_id=locker_id,
+    )
+
+
+def attach_signature(unsigned: UnsignedEnvelope, signature: str) -> SignedEnvelope:
+    """
+    Attach a signature to an unsigned envelope, producing a SignedEnvelope.
+
+    Args:
+        unsigned: UnsignedEnvelope from build_unsigned_envelope().
+        signature: Transport-ready encoded signature (base58 for ed25519,
+            0x-hex for secp256k1).
+
+    Returns:
+        SignedEnvelope with headers ready for HTTP request.
+    """
+    headers = {
+        "X-Nukez-Envelope": unsigned.envelope_b64,
+        "X-Nukez-Signature": signature,
+    }
+
+    return SignedEnvelope(
+        headers=headers,
+        canonical_body=unsigned.canonical_body,
+        locker_id=unsigned.locker_id,
     )

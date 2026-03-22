@@ -8,7 +8,14 @@ import json
 import tempfile
 
 import pytest
-from pynukez.auth import compute_locker_id, Keypair, build_signed_envelope
+from pynukez.auth import (
+    compute_locker_id,
+    Keypair,
+    build_signed_envelope,
+    build_unsigned_envelope,
+    attach_signature,
+    UnsignedEnvelope,
+)
 
 
 class TestComputeLockerId:
@@ -237,3 +244,204 @@ class TestBuildSignedEnvelopeGeneralized:
         )
         decoded = self._decode_envelope(env)
         assert "sig_alg" in decoded
+
+
+class TestBuildUnsignedEnvelope:
+    """Unsigned envelope construction for relay/external signing."""
+
+    def _decode_envelope(self, unsigned):
+        """Decode envelope JSON from base64url."""
+        import base64 as b64
+        raw = unsigned.envelope_b64
+        raw += "=" * (-len(raw) % 4)
+        return json.loads(b64.urlsafe_b64decode(raw))
+
+    def test_returns_unsigned_envelope(self):
+        """Returns an UnsignedEnvelope dataclass."""
+        env = build_unsigned_envelope(
+            signer_identity="FakePubkey123",
+            sig_alg="ed25519",
+            receipt_id="test_rid",
+            method="GET",
+            path="/v1/lockers/locker_test/files",
+            ops=["locker:list"],
+        )
+        assert isinstance(env, UnsignedEnvelope)
+
+    def test_envelope_has_required_fields(self):
+        """Envelope dict contains all required authentication fields."""
+        env = build_unsigned_envelope(
+            signer_identity="FakePubkey123",
+            sig_alg="ed25519",
+            receipt_id="test_rid",
+            method="GET",
+            path="/v1/lockers/locker_test/files",
+            ops=["locker:list"],
+        )
+        d = env.envelope
+        assert d["v"] == 1
+        assert d["receipt_id"] == "test_rid"
+        assert d["method"] == "GET"
+        assert d["path"] == "/v1/lockers/locker_test/files"
+        assert d["ops"] == ["locker:list"]
+        assert d["sig_alg"] == "ed25519"
+        assert "nonce" in d
+        assert "iat" in d
+        assert "exp" in d
+        assert "body_sha256" in d
+        assert "locker_id" in d
+
+    def test_b64_matches_json(self):
+        """base64url envelope decodes to the same dict."""
+        env = build_unsigned_envelope(
+            signer_identity="FakePubkey123",
+            sig_alg="ed25519",
+            receipt_id="test_rid",
+            method="GET",
+            path="/v1/test",
+            ops=[],
+        )
+        decoded = self._decode_envelope(env)
+        assert decoded == env.envelope
+
+    def test_canonical_json_is_sorted(self):
+        """envelope_json uses sorted keys and no whitespace."""
+        env = build_unsigned_envelope(
+            signer_identity="FakePubkey123",
+            sig_alg="ed25519",
+            receipt_id="test_rid",
+            method="GET",
+            path="/v1/test",
+            ops=[],
+        )
+        assert " " not in env.envelope_json
+        reparsed = json.loads(env.envelope_json)
+        assert reparsed == env.envelope
+
+    def test_post_requires_body(self):
+        """POST without body raises NukezError."""
+        from pynukez.errors import NukezError
+        with pytest.raises(NukezError, match="REQUIRED for POST"):
+            build_unsigned_envelope(
+                signer_identity="FakePubkey123",
+                sig_alg="ed25519",
+                receipt_id="test_rid",
+                method="POST",
+                path="/v1/test",
+                ops=[],
+            )
+
+    def test_post_with_body(self):
+        """POST with body sets canonical_body and body_sha256."""
+        env = build_unsigned_envelope(
+            signer_identity="FakePubkey123",
+            sig_alg="ed25519",
+            receipt_id="test_rid",
+            method="POST",
+            path="/v1/test",
+            ops=["locker:write"],
+            body={"filename": "test.txt"},
+        )
+        assert env.canonical_body is not None
+        expected_hash = hashlib.sha256(env.canonical_body.encode()).hexdigest()
+        assert env.envelope["body_sha256"] == expected_hash
+
+    def test_delegating_includes_signer(self):
+        """delegating=True includes signer identity in envelope."""
+        env = build_unsigned_envelope(
+            signer_identity="FakePubkey123",
+            sig_alg="ed25519",
+            receipt_id="test_rid",
+            method="GET",
+            path="/v1/test",
+            ops=[],
+            delegating=True,
+        )
+        assert env.envelope["signer"] == "FakePubkey123"
+
+    def test_not_delegating_omits_signer(self):
+        """delegating=False omits signer from envelope."""
+        env = build_unsigned_envelope(
+            signer_identity="FakePubkey123",
+            sig_alg="ed25519",
+            receipt_id="test_rid",
+            method="GET",
+            path="/v1/test",
+            ops=[],
+            delegating=False,
+        )
+        assert "signer" not in env.envelope
+
+    def test_secp256k1_sig_alg(self):
+        """EVM sig_alg is correctly set."""
+        env = build_unsigned_envelope(
+            signer_identity="0x1234abcd",
+            sig_alg="secp256k1",
+            receipt_id="test_rid",
+            method="GET",
+            path="/v1/test",
+            ops=[],
+        )
+        assert env.envelope["sig_alg"] == "secp256k1"
+
+    def test_locker_id_matches_compute(self):
+        """Locker ID in envelope matches compute_locker_id."""
+        env = build_unsigned_envelope(
+            signer_identity="FakePubkey123",
+            sig_alg="ed25519",
+            receipt_id="test_rid",
+            method="GET",
+            path="/v1/test",
+            ops=[],
+        )
+        assert env.locker_id == compute_locker_id("test_rid")
+        assert env.envelope["locker_id"] == compute_locker_id("test_rid")
+
+
+class TestAttachSignature:
+    """Attach external signature to unsigned envelope."""
+
+    def test_produces_signed_envelope(self):
+        """attach_signature returns a SignedEnvelope with correct headers."""
+        unsigned = build_unsigned_envelope(
+            signer_identity="FakePubkey123",
+            sig_alg="ed25519",
+            receipt_id="test_rid",
+            method="GET",
+            path="/v1/test",
+            ops=[],
+        )
+        signed = attach_signature(unsigned, "FakeSignature123")
+        assert signed.headers["X-Nukez-Envelope"] == unsigned.envelope_b64
+        assert signed.headers["X-Nukez-Signature"] == "FakeSignature123"
+        assert signed.locker_id == unsigned.locker_id
+        assert signed.canonical_body == unsigned.canonical_body
+
+    def test_post_preserves_canonical_body(self):
+        """attach_signature preserves canonical body from POST envelope."""
+        unsigned = build_unsigned_envelope(
+            signer_identity="FakePubkey123",
+            sig_alg="ed25519",
+            receipt_id="test_rid",
+            method="POST",
+            path="/v1/test",
+            ops=[],
+            body={"key": "value"},
+        )
+        signed = attach_signature(unsigned, "Sig456")
+        assert signed.canonical_body == unsigned.canonical_body
+        assert signed.canonical_body is not None
+
+    def test_roundtrip_matches_build_signed(self):
+        """Unsigned envelope + attach_signature produces same structure as build_signed_envelope."""
+        # Both paths should produce headers with the same keys
+        unsigned = build_unsigned_envelope(
+            signer_identity="FakePubkey123",
+            sig_alg="ed25519",
+            receipt_id="test_rid",
+            method="GET",
+            path="/v1/test",
+            ops=["locker:list"],
+        )
+        signed = attach_signature(unsigned, "TestSig")
+        assert set(signed.headers.keys()) == {"X-Nukez-Envelope", "X-Nukez-Signature"}

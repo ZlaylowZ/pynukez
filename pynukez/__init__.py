@@ -103,8 +103,11 @@ except ImportError:
 from .auth import (
     Keypair,
     build_signed_envelope,
+    build_unsigned_envelope,
+    attach_signature,
     compute_locker_id,
     SignedEnvelope,
+    UnsignedEnvelope,
 )
 
 # Discovery utilities
