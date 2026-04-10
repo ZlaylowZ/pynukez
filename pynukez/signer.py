@@ -130,7 +130,7 @@ class EVMSigner:
     def from_file(cls, path: str) -> "EVMSigner":
         """Load from JSON key file.
 
-        Expected format (same as ~/.keys/monad_key.json):
+        Expected format (same as ~/.keys/treasuries/gateway/staging/evm_key.json):
             {"address": "0x...", "private_key": "0x...", ...}
         """
         from .errors import NukezError
@@ -146,6 +146,9 @@ class EVMSigner:
         address = data.get("address", "")
 
         if not private_key:
-            raise ValueError(f"No private_key found in {p}")
+            raise NukezError(
+                f"No private_key found in {p}. "
+                f"Expected JSON format: {{\"address\": \"0x...\", \"private_key\": \"0x...\"}}"
+            )
 
         return cls(private_key=private_key, address=address)

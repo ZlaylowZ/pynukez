@@ -54,7 +54,7 @@ from .types import (
 from .auth import Keypair, build_signed_envelope, compute_locker_id
 from .errors import NukezError, PaymentRequiredError, TransactionNotFoundError
 from .hardening import sanitize_upload_data, validate_signed_url
-from ._http import HTTPClient
+from ._http import HTTPClient, caip2_to_friendly
 from ._helpers import (
     UPLOAD_STRING_MAX_BYTES as UPLOAD_STRING_MAX_BYTES,
     _SANDBOX_PATH_BLOCKED_MARKERS as _SANDBOX_PATH_BLOCKED_MARKERS,
@@ -173,12 +173,12 @@ class Nukez:
             client = Nukez(keypair_path="~/.config/solana/id.json")
 
             # EVM-only owner (signs envelopes with secp256k1)
-            client = Nukez(evm_private_key_path="~/.keys/evm_key.json",
+            client = Nukez(evm_private_key_path="~/.keys/treasuries/gateway/staging/evm_key.json",
                            auto_bind_operator=False)
 
             # Dual-key (Ed25519 for signing, EVM for payment)
-            client = Nukez(keypair_path="~/.keys/sol.json",
-                           evm_private_key_path="~/.keys/evm.json")
+            client = Nukez(keypair_path="~/.keys/treasuries/gateway/staging/svm_key.json",
+                           evm_private_key_path="~/.keys/treasuries/gateway/staging/evm_key.json")
         """
 
         self.base_url = base_url.rstrip('/')
@@ -457,11 +457,15 @@ class Nukez:
             This endpoint returns HTTP 402 Payment Required - this is expected behavior,
             not an error. The response contains the payment instructions.
         """
-        # Auto-detect EVM defaults when client has an EVM key configured
+        # Auto-detect EVM defaults when client has an EVM key configured.
+        # Infer mainnet vs testnet from client.network — don't hardcode testnet.
         if not pay_network and self._evm_private_key_path:
-            pay_network = "monad-testnet"
+            if self.network in ("mainnet-beta", "mainnet", "solana-mainnet"):
+                pay_network = "monad-mainnet"
+            else:
+                pay_network = "monad-testnet"
         if not pay_asset and pay_network and pay_network.lower() in (
-            "monad-testnet", "monad", "eip155:10143",
+            "monad-testnet", "monad-mainnet", "monad", "eip155:10143", "eip155:143",
         ):
             pay_asset = "MON"
 
@@ -520,12 +524,7 @@ class Nukez:
                     request.pay_to_address = opt["pay_to_address"]
                     request.pay_asset = opt["pay_asset"]
                     raw_net = opt.get("network", "")
-                    if raw_net.startswith("eip155:"):
-                        request.network = pay_network or "monad-testnet"
-                    elif raw_net.startswith("solana:"):
-                        request.network = "solana-devnet"
-                    else:
-                        request.network = raw_net
+                    request.network = caip2_to_friendly(raw_net, pay_network)
                     request.amount = opt.get("amount")
                     request.amount_raw = int(opt["amount"]) if opt.get("amount") else None
                     request.token_address = opt.get("asset_contract") if opt.get("asset_contract") not in (None, "native") else None
@@ -735,7 +734,9 @@ class Nukez:
         # Map user-friendly chain names to x402 network identifiers.
         _chain_to_x402 = {
             "monad-testnet": "eip155:10143",
-            "monad-mainnet": "eip155:10143",
+            "monad-mainnet": "eip155:143",
+            "solana-devnet": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+            "solana-mainnet": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
         }
         if payment_chain:
             headers["X-Payment-Chain"] = _chain_to_x402.get(payment_chain, payment_chain)
@@ -818,6 +819,8 @@ class Nukez:
                         "AMOUNT_MISMATCH", "WRONG_RECIPIENT",
                         "QUOTE_EXPIRED", "DUPLICATE_CONFIRM",
                         "INVALID_PAY_REQ", "PAYMENT_VERIFICATION_FAILED",
+                        "INSUFFICIENT_AMOUNT", "INSUFFICIENT_PAYMENT",
+                        "TX_FAILED", "TX_REVERTED",
                     }
                     is_retryable_402 = (
                         is_tx_not_found

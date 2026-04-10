@@ -433,7 +433,7 @@ class OperatorIsOwnerError(OperatorError):
     400 OPERATOR_IS_OWNER / OPERATOR_IS_PAYER — cannot delegate to yourself.
 
     Recovery:
-        Use a different Ed25519 keypair as the operator.
+        Use a different keypair as the operator (Ed25519 or EVM).
     """
 
     def __init__(self, pubkey: str = "", locker_id: str = "", error_code: str = "OPERATOR_IS_OWNER"):

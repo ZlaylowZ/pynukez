@@ -64,6 +64,7 @@ from .auth import Keypair, build_signed_envelope, compute_locker_id
 from .errors import NukezError, PaymentRequiredError, TransactionNotFoundError
 from .hardening import sanitize_upload_data, validate_signed_url
 from ._async_http import AsyncHTTPClient
+from ._http import caip2_to_friendly
 
 # Lazy import for optional Solana support
 SolanaPayment = None
@@ -515,6 +516,18 @@ class AsyncNukez:
         pay_asset: str = None,
     ) -> StorageRequest:
         """Step 1: Start the x402 payment flow to purchase storage."""
+        # Auto-detect EVM defaults when client has an EVM key configured.
+        # Infer mainnet vs testnet from client.network — don't hardcode testnet.
+        if not pay_network and self._evm_private_key_path:
+            if self.network in ("mainnet-beta", "mainnet", "solana-mainnet"):
+                pay_network = "monad-mainnet"
+            else:
+                pay_network = "monad-testnet"
+        if not pay_asset and pay_network and pay_network.lower() in (
+            "monad-testnet", "monad-mainnet", "monad", "eip155:10143", "eip155:143",
+        ):
+            pay_asset = "MON"
+
         try:
             body = {"units": units}
             if provider:
@@ -549,6 +562,36 @@ class AsyncNukez:
                 terms=e.terms,
                 price_breakdown=e.details.get("price_breakdown"),
             )
+
+            # If the caller requested a specific chain/asset, override the
+            # top-level fields with the matching payment option so that
+            # the StorageRequest reflects the correct pay_to_address,
+            # amount, etc.  The _http layer defaults to Solana, which
+            # causes confirm_storage to verify against the wrong treasury.
+            if pay_asset and request.payment_options:
+                _net_hint = (pay_network or "").lower()
+                for opt in request.payment_options:
+                    if opt.get("pay_asset", "").upper() != pay_asset.upper():
+                        continue
+                    # If a network hint was given, also match on it
+                    if _net_hint and _net_hint not in opt.get("network", "").lower():
+                        continue
+                    # Found matching option — override top-level fields
+                    request.pay_to_address = opt["pay_to_address"]
+                    request.pay_asset = opt["pay_asset"]
+                    raw_net = opt.get("network", "")
+                    request.network = caip2_to_friendly(raw_net, pay_network)
+                    request.amount = opt.get("amount")
+                    request.amount_raw = int(opt["amount"]) if opt.get("amount") else None
+                    request.token_address = opt.get("asset_contract") if opt.get("asset_contract") not in (None, "native") else None
+                    request.token_decimals = opt.get("decimals")
+                    if opt.get("human_amount"):
+                        try:
+                            request.amount_sol = float(opt["human_amount"])
+                        except (ValueError, TypeError):
+                            pass
+                    break
+
             return request
 
     async def solana_transfer(
@@ -662,6 +705,18 @@ class AsyncNukez:
             "Content-Type": "application/json",
             "X402-TX": tx_sig,
         }
+        # Also send as x402 headers (belt-and-suspenders with body fields).
+        # Map user-friendly chain names to x402 network identifiers.
+        _chain_to_x402 = {
+            "monad-testnet": "eip155:10143",
+            "monad-mainnet": "eip155:143",
+            "solana-devnet": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+            "solana-mainnet": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        }
+        if payment_chain:
+            headers["X-Payment-Chain"] = _chain_to_x402.get(payment_chain, payment_chain)
+        if payment_asset:
+            headers["X-Payment-Asset"] = payment_asset
 
         last_error: Optional[Exception] = None
 

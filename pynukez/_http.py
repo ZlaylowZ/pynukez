@@ -34,10 +34,44 @@ from .errors import (
 
 # Standard headers shared by sync and async clients
 STANDARD_HEADERS = {
-    "User-Agent": "nukez-sdk/3.2.0",
+    "User-Agent": "nukez-sdk/3.3.0",
     "Accept": "application/json",
     "Content-Type": "application/json",
 }
+
+
+# CAIP-2 network identifier to SDK-friendly name mapping.
+# Used by the 402 parser and re-selection logic in both sync/async clients.
+CAIP2_TO_FRIENDLY = {
+    "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "solana-mainnet",
+    "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": "solana-devnet",
+    "solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z": "solana-testnet",
+    "eip155:143": "monad-mainnet",
+    "eip155:10143": "monad-testnet",
+}
+
+
+def caip2_to_friendly(raw_network: str, fallback_hint: str = "") -> str:
+    """Resolve a CAIP-2 network identifier to a friendly name.
+
+    Args:
+        raw_network: CAIP-2 string (e.g. "solana:5eykt4UsFv..." or "eip155:143")
+                     or already-friendly name (e.g. "solana-mainnet").
+        fallback_hint: Preferred friendly name if CAIP-2 is unknown (e.g. from
+                       the caller's pay_network parameter).
+
+    Returns:
+        Friendly network string (e.g. "solana-mainnet", "monad-testnet").
+    """
+    known = CAIP2_TO_FRIENDLY.get(raw_network)
+    if known:
+        return known
+    if raw_network.startswith("solana:"):
+        return fallback_hint or "solana-mainnet"
+    if raw_network.startswith("eip155:"):
+        chain_id = raw_network.split(":")[-1]
+        return "monad-mainnet" if chain_id == "143" else (fallback_hint or "monad-testnet")
+    return raw_network
 
 
 # ---------------------------------------------------------------------------
@@ -171,13 +205,11 @@ def handle_error_response(response) -> None:
             extra = selected.get("extra", {})
             raw_network = selected.get("network", "")
 
-            # Parse network: x402 uses "solana:EtW..." or "eip155:10143"
-            if raw_network.startswith("solana:"):
-                network = "solana-devnet"
-            elif raw_network.startswith("eip155:"):
-                network = "monad-testnet"
-            else:
-                network = raw_network
+            # Parse network: x402 uses CAIP-2 identifiers like
+            # "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" or "eip155:10143".
+            # Must resolve to the correct friendly name — hardcoding devnet
+            # breaks mainnet confirm_storage (gateway validates CAIP-2 match).
+            network = caip2_to_friendly(raw_network)
 
             pay_to_address = selected.get("payTo", "")
             pay_asset = extra.get("name", "SOL")
