@@ -498,7 +498,8 @@ Owners can delegate file operations to other signers (operators) without sharing
 |--------|---------|-------------|
 | `add_operator(receipt_id, operator_pubkey)` | `OperatorResult` | Authorize an operator (owner-only) |
 | `remove_operator(receipt_id, operator_pubkey)` | `OperatorResult` | Revoke an operator (owner-only) |
-| `set_owner(receipt_id, identity=None)` | `None` | Cache the owner identity for delegation logic |
+| `bind_receipt(receipt=None, *, receipt_id, owner_identity, sig_alg)` | `None` | Prime per-receipt signer/owner state for cross-session flows |
+| `set_owner(receipt_id, identity=None)` | `None` | Compatibility shim over `bind_receipt` (prefer `bind_receipt` in new code) |
 
 ```python
 # Owner authorizes an operator
@@ -513,6 +514,35 @@ urls = operator_client.create_file(receipt.id, "delegated.txt")
 client.remove_operator(receipt.id, "operator_pubkey_base58")
 ```
 
+### Cross-Session Workflows: `bind_receipt`
+
+`confirm_storage()` primes per-receipt state (owner identity + signature
+algorithm) on the client in the same process.  If you load a receipt from
+disk, a database, or a gateway response in a fresh client — or re-run a
+notebook cell that rebuilt the client — the state is cold.  On dual-key
+clients (both `keypair_path` and `evm_private_key_path`), owner-only ops
+like `add_operator`/`remove_operator` will raise `ReceiptStateNotBoundError`
+instead of silently picking the wrong signer.
+
+Recovery is one call:
+
+```python
+# Option A — pass the Receipt dataclass (primes both owner and sig_alg)
+client.bind_receipt(receipt)
+
+# Option B — raw kwargs (loaded from JSON, DB, etc.)
+client.bind_receipt(
+    receipt_id="8573c83375ebf3ac",
+    owner_identity="0xc12e3657ce2ede7fae1d6f5a83b386f6a630fd18",
+    # sig_alg is inferred from owner_identity format (0x → secp256k1)
+)
+```
+
+`bind_receipt` is purely local state priming — no network I/O, safe to
+call from any context.  Idempotent on identical values; raises
+`NukezError` on conflicting re-bind (different `owner_identity` or
+`sig_alg` for the same `receipt_id`).
+
 ### Operator Error Classes
 
 | Error | HTTP | Description |
@@ -524,6 +554,7 @@ client.remove_operator(receipt.id, "operator_pubkey_base58")
 | `OwnerOnlyError` | 403 | Action requires owner (not operator) |
 | `OperatorNotFoundError` | 404 | Removing non-existent operator |
 | `OperatorConflictError` | 409 | Duplicate add or max operators reached |
+| `ReceiptStateNotBoundError` | -- | Dual-key client needs `bind_receipt()` before op |
 
 ---
 

@@ -60,22 +60,37 @@ EVM_TOKENS: Dict[int, Dict[str, Dict[str, Any]]] = {
         "USDT": {"address": "0x88b8E2161DEDC77EF4ab7585569D2415a1C1055D", "decimals": 6},
         "WETH": {"address": "0xB5a30b0FDc5EA94A52fDc42e3E9760Cb8449Fb37", "decimals": 18},
     },
+    1187947933: {  # skale-base (mainnet, zero gas)
+        "USDC": {"address": "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20", "decimals": 6},
+        "USDT": {"address": "0x2bF5bF154b515EaA82C31a65ec11554fF5aF7fCA", "decimals": 6},
+        "SKL":  {"address": "0x9710566Cb041bD4cDa6CB24336bc887221d11a6e", "decimals": 18},
+    },
+    324705682: {  # skale-base-testnet (Sepolia, zero gas)
+        "USDC": {"address": "0x2e08028E3C4c2356572E096d8EF835cD5C6030bD", "decimals": 6},
+        "USDT": {"address": "0x3Ca0A49f511c2c89c4DCbbf1731120d8919050Bf", "decimals": 6},
+        "SKL":  {"address": "0xAF2E0FF5b5F51553FdB34Ce7F04a6C3201CeE57b", "decimals": 18},
+    },
 }
 
 NETWORK_TO_CHAIN_ID: Dict[str, int] = {
     "monad-mainnet": 143,
     "monad-testnet": 10143,
+    "skale-base": 1187947933,
+    "skale-base-testnet": 324705682,
 }
 
 # Default RPC endpoints from env vars (matching gateway config pattern)
 _DEFAULT_RPC: Dict[str, str] = {
     "monad-mainnet": "MONAD_MAINNET_RPC_PRIMARY",
     "monad-testnet": "MONAD_TESTNET_RPC_PRIMARY",
+    "skale-base": "SKALE_BASE_RPC_PRIMARY",
+    "skale-base-testnet": "SKALE_BASE_TESTNET_RPC_PRIMARY",
 }
 
 _DEFAULT_RPC_FALLBACK: Dict[str, str] = {
     "monad-mainnet": "MONAD_MAINNET_RPC_FALLBACK",
     "monad-testnet": "MONAD_TESTNET_RPC_FALLBACK",
+    # SKALE Base: single-endpoint, no fallback configured
 }
 
 # ERC-20 minimal ABI for transfer()
@@ -201,7 +216,7 @@ class EVMPayment:
     Parallel to SolanaPayment. Handles native token and ERC-20 transfers.
 
     Usage:
-        evm = EVMPayment(private_key_path="~/.nukez/evm_key.hex", network="monad-testnet")
+        evm = EVMPayment(private_key_path="~/.keys/treasuries/gateway/staging/evm_key.json", network="monad-testnet")
         tx_hash = evm.transfer(to_address="0x...", amount_raw=1000000, pay_asset="USDC",
                                token_address="0x...")
     """
@@ -305,6 +320,26 @@ class EVMPayment:
         Returns:
             0x-prefixed transaction hash
         """
+        # Pre-flight balance check — only surfaces error on insufficient funds
+        balance_wei = self._w3.eth.get_balance(self.address)
+        # Estimate gas cost (~21000 * current gas price) for total needed
+        gas_estimate = 21_000
+        try:
+            gas_price_est = self._w3.eth.gas_price
+        except Exception:
+            gas_price_est = 0
+        total_needed = amount_wei + (gas_estimate * gas_price_est)
+        if balance_wei < total_needed:
+            balance_fmt = balance_wei / 1e18
+            needed_fmt = total_needed / 1e18
+            deficit_fmt = (total_needed - balance_wei) / 1e18
+            raise NukezError(
+                f"Insufficient balance for native transfer. "
+                f"Have: {balance_fmt:.6f}, need: {needed_fmt:.6f} "
+                f"(deficit: {deficit_fmt:.6f}). "
+                f"Wallet: {self.address}"
+            )
+
         with self._nonce_lock:
             nonce = self._w3.eth.get_transaction_count(self.address, "pending")
 
@@ -366,6 +401,29 @@ class EVMPayment:
             address=Web3.to_checksum_address(token_address),
             abi=ERC20_ABI,
         )
+
+        # Pre-flight balance check — only surfaces error on insufficient funds
+        try:
+            token_balance = contract.functions.balanceOf(self.address).call()
+            if token_balance < amount_raw:
+                # Try to get decimals for human-readable formatting
+                try:
+                    decimals = contract.functions.decimals().call()
+                except Exception:
+                    decimals = 18
+                bal_fmt = token_balance / (10 ** decimals)
+                need_fmt = amount_raw / (10 ** decimals)
+                deficit_fmt = (amount_raw - token_balance) / (10 ** decimals)
+                raise NukezError(
+                    f"Insufficient token balance for ERC-20 transfer. "
+                    f"Have: {bal_fmt:.6f}, need: {need_fmt:.6f} "
+                    f"(deficit: {deficit_fmt:.6f}). "
+                    f"Token: {token_address}, wallet: {self.address}"
+                )
+        except NukezError:
+            raise
+        except Exception:
+            pass  # If balance check fails, proceed and let the tx fail naturally
 
         with self._nonce_lock:
             nonce = self._w3.eth.get_transaction_count(self.address, "pending")
@@ -496,12 +554,18 @@ class EVMPayment:
         tx_hash: str,
         timeout: float = 30.0,
         poll_interval: float = 0.5,
+        post_delay: float = 1.0,
     ) -> None:
         """
         Wait for transaction to be mined and confirmed.
 
         Monad has ~400ms blocks and ~800ms finality, so we poll
         aggressively with 500ms intervals (default 1 confirmation).
+
+        post_delay: seconds to wait *after* local confirmation before
+        returning.  Gives the gateway's RPC node time to index the
+        same block — cross-node propagation on Monad typically takes
+        < 1 s, but bursty load can push it higher.
         """
         start = time.time()
         while time.time() - start < timeout:
@@ -510,6 +574,7 @@ class EVMPayment:
                 if receipt is not None:
                     status = receipt.get("status", 0)
                     if status == 1:
+                        time.sleep(post_delay)
                         return  # Success
                     elif status == 0:
                         raise NukezError(

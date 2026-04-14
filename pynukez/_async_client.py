@@ -60,8 +60,19 @@ from .types import (
     OperatorResult,
 )
 
-from .auth import Keypair, build_signed_envelope, compute_locker_id
-from .errors import NukezError, PaymentRequiredError, TransactionNotFoundError
+from .auth import (
+    Keypair,
+    build_signed_envelope,
+    compute_locker_id,
+    infer_sig_alg,
+    _ReceiptState,
+)
+from .errors import (
+    NukezError,
+    PaymentRequiredError,
+    ReceiptStateNotBoundError,
+    TransactionNotFoundError,
+)
 from .hardening import sanitize_upload_data, validate_signed_url
 from ._async_http import AsyncHTTPClient
 from ._http import caip2_to_friendly
@@ -188,15 +199,12 @@ class AsyncNukez:
                     "Install with: pip install pynukez[evm]"
                 )
 
-        # Owner identity cache: receipt_id → owner identity string.
-        # Populated by confirm_storage() and provision_locker().
-        # Used by _is_delegating() to decide whether the signer field
-        # must appear in the envelope (operator delegation).
-        self._owner_cache: Dict[str, str] = {}
-        # Maps receipt_id → sig_alg ("secp256k1" or "ed25519").
-        # Populated by confirm_storage(). Used by _require_signer()
-        # to auto-select the correct signing key for dual-key clients.
-        self._sig_alg_cache: Dict[str, str] = {}
+        # Per-receipt state: receipt_id → _ReceiptState(owner_identity, sig_alg).
+        # Single source of truth for owner delegation detection (_is_delegating)
+        # and dual-key signer auto-selection (_require_signer). Written
+        # exclusively through bind_receipt() so every write goes through the
+        # same validation path (conflict detection, sig_alg inference).
+        self._receipt_state: Dict[str, _ReceiptState] = {}
 
         # Lazy-initialized payment handlers
         self._payment = None
@@ -234,53 +242,127 @@ class AsyncNukez:
     # ------------------------------------------------------------------
 
     def _require_signer(self, operation: str, receipt_id: str = ""):
-        """
-        Ensure a signer is available for envelope signing.
+        """Ensure a signer is available and return the correct one for this receipt.
 
-        For dual-key clients (both keypair_path and evm_private_key_path),
-        auto-selects the correct signer based on the receipt's sig_alg:
-          - EVM-paid receipt (secp256k1) → use EVM signer
-          - Solana-paid receipt (ed25519) → use Ed25519 signer
-          - Unknown receipt → use default signer
+        Mirrors :meth:`Nukez._require_signer` exactly — see that docstring
+        for behavior.  Raises :class:`ReceiptStateNotBoundError` on cold
+        dual-key state instead of silently guessing.
         """
         if self._signer is None:
             raise NukezError(
                 f"{operation} requires a signing key. "
                 "Provide keypair_path, evm_private_key_path, or signing_key."
             )
-        # Dual-key auto-select: if we have both signers and know the receipt's chain
-        if receipt_id and self._evm_signer:
-            alg = self._sig_alg_cache.get(receipt_id, "")
-            if alg == "secp256k1":
-                return self._evm_signer
-            # ed25519 or unknown → default signer (Ed25519 keypair)
-        return self._signer
+        if not self._evm_signer:
+            return self._signer
+        if not receipt_id:
+            return self._signer
+        state = self._receipt_state.get(receipt_id)
+        if state is None or not state.sig_alg:
+            raise ReceiptStateNotBoundError(receipt_id=receipt_id, operation=operation)
+        if state.sig_alg == "secp256k1":
+            return self._evm_signer
+        if state.sig_alg == "ed25519":
+            return self._signer
+        raise ReceiptStateNotBoundError(receipt_id=receipt_id, operation=operation)
 
     def _is_delegating(self, receipt_id: str) -> bool:
         """Return True when the current signer is NOT the locker owner.
 
-        Uses ``_owner_cache`` (populated by :meth:`confirm_storage` and
-        :meth:`provision_locker`).  When the owner identity for a receipt_id
-        is unknown — e.g. a fresh operator client that never provisioned —
-        we default to ``True`` (include the ``signer`` field).  This is safe:
-        including ``signer`` when the signer *is* the owner just adds a
-        harmless identity comparison server-side, while *omitting* it when
-        the signer is an operator causes a hard ``AuthenticationError``.
+        Mirrors :meth:`Nukez._is_delegating` — raises on cold dual-key state
+        rather than silently defaulting to ``True``.
         """
         if self._signer is None:
             return False
-        owner = self._owner_cache.get(receipt_id)
-        if owner is None:
-            # Unknown owner — assume delegation (safe default).
+        state = self._receipt_state.get(receipt_id)
+        if state is None or not state.owner_identity:
+            if self._evm_signer:
+                raise ReceiptStateNotBoundError(
+                    receipt_id=receipt_id, operation="_is_delegating"
+                )
             return True
-        return self._signer.identity != owner
+        return self._signer.identity != state.owner_identity
+
+    def bind_receipt(
+        self,
+        receipt: Optional[Receipt] = None,
+        *,
+        receipt_id: str = "",
+        owner_identity: str = "",
+        sig_alg: str = "",
+    ) -> None:
+        """Prime per-receipt state from a :class:`Receipt` or raw fields.
+
+        Mirrors :meth:`Nukez.bind_receipt` — pure state priming, no I/O,
+        safe to call from any context.  See the sync client's docstring for
+        the full contract.
+        """
+        if receipt is not None:
+            receipt_id = receipt_id or receipt.id
+            owner_identity = owner_identity or receipt.payer_pubkey
+            sig_alg = sig_alg or receipt.sig_alg
+
+        if not receipt_id:
+            raise NukezError(
+                "bind_receipt requires receipt_id (pass receipt=... or receipt_id=...)."
+            )
+        if not owner_identity and not sig_alg:
+            raise NukezError(
+                f"bind_receipt for '{receipt_id}' requires owner_identity "
+                f"or sig_alg — nothing to prime."
+            )
+
+        if not sig_alg and owner_identity:
+            inferred = infer_sig_alg(owner_identity)
+            if inferred:
+                sig_alg = inferred
+        if not sig_alg:
+            raise NukezError(
+                f"bind_receipt cannot determine sig_alg for receipt "
+                f"'{receipt_id}' from owner_identity '{owner_identity}'. "
+                f"Call bind_receipt with explicit sig_alg='secp256k1' or "
+                f"sig_alg='ed25519'."
+            )
+        if sig_alg not in ("secp256k1", "ed25519"):
+            raise NukezError(
+                f"bind_receipt: sig_alg must be 'secp256k1' or 'ed25519', "
+                f"got '{sig_alg}'."
+            )
+
+        existing = self._receipt_state.get(receipt_id)
+        if existing is not None:
+            if (
+                owner_identity
+                and existing.owner_identity
+                and existing.owner_identity != owner_identity
+            ):
+                raise NukezError(
+                    f"bind_receipt: receipt '{receipt_id}' is already bound "
+                    f"to owner '{existing.owner_identity}', refusing to "
+                    f"overwrite with '{owner_identity}'."
+                )
+            if existing.sig_alg and existing.sig_alg != sig_alg:
+                raise NukezError(
+                    f"bind_receipt: receipt '{receipt_id}' is already bound "
+                    f"with sig_alg '{existing.sig_alg}', refusing to "
+                    f"overwrite with '{sig_alg}'."
+                )
+            self._receipt_state[receipt_id] = _ReceiptState(
+                owner_identity=owner_identity or existing.owner_identity,
+                sig_alg=sig_alg,
+            )
+            return
+
+        self._receipt_state[receipt_id] = _ReceiptState(
+            owner_identity=owner_identity,
+            sig_alg=sig_alg,
+        )
 
     def set_owner(self, receipt_id: str, identity: Optional[str] = None) -> None:
-        """Pre-seed the owner cache so ``_is_delegating()`` returns False.
+        """Pre-seed the owner identity for a receipt.
 
-        Call this when you are the locker owner but haven't gone through
-        ``confirm_storage()`` or ``provision_locker()`` in this process —
-        e.g. a fresh client that already has a receipt_id.
+        Thin compatibility shim over :meth:`bind_receipt`.  Prefer
+        :meth:`bind_receipt` in new code.
 
         Args:
             receipt_id: The receipt/locker identifier.
@@ -288,7 +370,8 @@ class AsyncNukez:
                 signer's identity (i.e. "I am the owner").
 
         Raises:
-            NukezError: If no signer is configured and identity is not provided.
+            NukezError: If no signer is configured and identity is not provided,
+                or if sig_alg cannot be inferred from the identity string.
         """
         if identity is None:
             if self._signer is None:
@@ -297,7 +380,7 @@ class AsyncNukez:
                     "or a configured signer."
                 )
             identity = self._signer.identity
-        self._owner_cache[receipt_id] = identity
+        self.bind_receipt(receipt_id=receipt_id, owner_identity=identity)
 
     def _require_keypair(self, operation: str) -> Keypair:
         """Ensure keypair is available. Deprecated — use _require_signer."""
@@ -750,11 +833,16 @@ class AsyncNukez:
                         price_usd=float(rcpt.get("price_usd", 0)),
                         authorized_operator=rcpt.get("authorized_operator") or data.get("authorized_operator"),
                     )
-                    # Cache owner identity for _is_delegating() lookups.
-                    self._owner_cache[data["receipt_id"]] = receipt.payer_pubkey
-                    # Cache sig_alg for dual-key signer auto-selection.
-                    if receipt.sig_alg:
-                        self._sig_alg_cache[data["receipt_id"]] = receipt.sig_alg
+                    # Prime per-receipt state. Gateway response is authoritative,
+                    # so we bypass bind_receipt's conflict check by writing
+                    # directly — this is the only write site outside bind_receipt
+                    # and it never races with a prior bind for a fresh receipt.
+                    alg = receipt.sig_alg or infer_sig_alg(receipt.payer_pubkey) or ""
+                    if alg:
+                        self._receipt_state[data["receipt_id"]] = _ReceiptState(
+                            owner_identity=receipt.payer_pubkey,
+                            sig_alg=alg,
+                        )
                     return receipt
 
                 if resp.status_code == 402:
@@ -848,8 +936,16 @@ class AsyncNukez:
             created_at=space.get("created_at"),
         )
 
-        # Cache owner identity — provision is owner-only, so signer IS the owner.
-        self._owner_cache[receipt_id] = signer.identity
+        # Prime owner identity — provision is owner-only, so signer IS the owner.
+        alg = infer_sig_alg(signer.identity)
+        if not alg:
+            alg = "secp256k1" if signer is self._evm_signer else "ed25519"
+        existing = self._receipt_state.get(receipt_id)
+        if existing is None:
+            self._receipt_state[receipt_id] = _ReceiptState(
+                owner_identity=signer.identity,
+                sig_alg=alg,
+            )
 
         return manifest
 

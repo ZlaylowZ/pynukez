@@ -90,6 +90,7 @@ from .errors import (
     OwnerOnlyError,               # 403 owner-only action
     OperatorNotFoundError,        # 404 removing non-existent operator
     OperatorConflictError,        # 409 duplicate or max reached
+    ReceiptStateNotBoundError,    # bind_receipt required before op
 )
 
 # EVM payment support (optional — requires pip install pynukez[evm])
@@ -106,6 +107,7 @@ from .auth import (
     build_unsigned_envelope,
     attach_signature,
     compute_locker_id,
+    infer_sig_alg,
     SignedEnvelope,
     UnsignedEnvelope,
 )
@@ -117,7 +119,7 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "3.4.0"
+__version__ = "3.5.0"
 
 __all__ = [
     # Main client
@@ -163,12 +165,26 @@ __all__ = [
     "NukezNotProvisionedError",
     "InsufficientFundsError",
     "RateLimitError",
-    
+    "ReceiptStateNotBoundError",
+
+    # Operator delegation errors
+    "OperatorError",
+    "InvalidOperatorPubkeyError",
+    "OperatorIsOwnerError",
+    "OperatorNotAuthorizedError",
+    "OwnerOnlyError",
+    "OperatorNotFoundError",
+    "OperatorConflictError",
+
     # Authentication utilities
     "Keypair",
-    "build_signed_envelope", 
+    "build_signed_envelope",
+    "build_unsigned_envelope",
+    "attach_signature",
     "compute_locker_id",
+    "infer_sig_alg",
     "SignedEnvelope",
+    "UnsignedEnvelope",
     
     # Discovery utilities
     "discover",

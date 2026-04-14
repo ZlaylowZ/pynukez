@@ -32,6 +32,52 @@ except ImportError:
     base58 = None
 
 from .errors import NukezError
+from .signer import _EVM_ADDR_RE
+
+
+@dataclass
+class _ReceiptState:
+    """Per-receipt signer/owner state primed by confirm_storage/provision_locker/bind_receipt.
+
+    Collapses the old ``_owner_cache`` and ``_sig_alg_cache`` dicts into a single
+    record so partial-state bugs become impossible by construction.
+
+    Attributes:
+        owner_identity: Public identifier of the locker owner (0x EVM or base58 Ed25519).
+        sig_alg: Signature algorithm of the owner — ``"secp256k1"`` or ``"ed25519"``.
+    """
+    owner_identity: str
+    sig_alg: str
+
+
+def infer_sig_alg(identity: str) -> Optional[str]:
+    """Infer the signature algorithm from a public identity string.
+
+    Mirrors the gateway's own inference in ``identity.py`` so the SDK and
+    server always agree on the mapping:
+
+      * ``0x`` + 40 hex chars → ``"secp256k1"``
+      * base58 that decodes to exactly 32 bytes → ``"ed25519"``
+      * anything else → ``None`` (caller must raise or prompt for explicit value)
+
+    This helper is deliberately pure: it takes a string, returns a string
+    (or ``None``), touches no network, and holds no state.  Use it as the
+    cold-start fallback when a receipt's ``sig_alg`` was not supplied.
+    """
+    if not identity:
+        return None
+    # 0x-prefix check is anchored first — adversarial 42-char no-prefix strings
+    # that happen to decode as 32-byte base58 must not be mis-classified.
+    if _EVM_ADDR_RE.match(identity):
+        return "secp256k1"
+    if HAS_BASE58:
+        try:
+            decoded = base58.b58decode(identity)
+            if len(decoded) == 32:
+                return "ed25519"
+        except Exception:
+            pass
+    return None
 
 
 @dataclass

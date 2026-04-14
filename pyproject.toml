@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pynukez"
-version = "3.4.0"
+version = "3.5.0"
 description = "Nukez SDK — agent-native storage with cryptographic verification"
 readme = "README.md"
 license = {text = "MIT"}
@@ -34,6 +34,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Internet :: WWW/HTTP",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -69,10 +70,10 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/nukez/pynukez"
+Homepage = "https://github.com/ZlaylowZ/pynukez"
 Documentation = "https://docs.nukez.xyz/sdk/python"
-Repository = "https://github.com/nukez/pynukez"
-Issues = "https://github.com/nukez/pynukez/issues"
+Repository = "https://github.com/ZlaylowZ/pynukez"
+Issues = "https://github.com/ZlaylowZ/pynukez/issues"
 
 [project.scripts]
 pynukez = "pynukez.cli:main"

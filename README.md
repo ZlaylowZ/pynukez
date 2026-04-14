@@ -172,9 +172,17 @@ Important: if a valid `receipt_id` already exists, reuse it. Do not purchase sto
 receipt = client.confirm_storage(...)
 print(receipt.id)  # Save this string somewhere!
 
-# Later
-files = client.list_files("your_saved_receipt_id")
+# Later — fresh process, reconstructed client:
+client.bind_receipt(receipt)          # or: bind_receipt(receipt_id=..., owner_identity=...)
+files = client.list_files(receipt.id)
 ```
+
+`confirm_storage()` primes per-receipt state automatically in the same
+process. Across kernel restarts, subprocesses, or receipts loaded from
+disk/DB, call `bind_receipt(receipt)` before owner-only ops
+(`add_operator`, `remove_operator`) — on dual-key clients, the SDK
+refuses to guess which signer to use and raises `ReceiptStateNotBoundError`
+instead.
 
 ---
 
@@ -200,6 +208,8 @@ client = Nukez(keypair_path="~/.config/solana/id.json", network="mainnet-beta")
 | "Insufficient funds" | Run `solana airdrop 2` (devnet only) |
 | "URL expired" | Call `client.get_file_urls(receipt_id, filename)` for fresh URLs |
 | "File not found" | Check `client.list_files(receipt_id)` to see what exists |
+| `ReceiptStateNotBoundError` | Call `client.bind_receipt(receipt)` before the op (cross-session / fresh-client flows) |
+| `AuthenticationError: Envelope sig_alg '...' incompatible with ... network` | Dual-key client picked wrong signer — call `client.bind_receipt(receipt)` first |
 
 ---
 

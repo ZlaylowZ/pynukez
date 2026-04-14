@@ -496,6 +496,39 @@ class OperatorNotFoundError(OperatorError):
         )
 
 
+class ReceiptStateNotBoundError(NukezError):
+    """
+    Raised when a client needs per-receipt state (owner identity or sig_alg)
+    that has not been primed.
+
+    This is the cold-cache signal — the client has enough information to know
+    that it doesn't have enough information.  Instead of silently guessing a
+    signer or a delegation flag, the SDK raises this so callers can recover
+    explicitly.
+
+    Recovery:
+        Call ``client.bind_receipt(receipt=...)`` (or
+        ``client.bind_receipt(receipt_id=..., owner_identity=..., sig_alg=...)``)
+        before retrying the operation.
+
+    Attributes:
+        receipt_id: The receipt whose state is missing.
+        operation: The SDK method that triggered the lookup (for diagnostics).
+    """
+
+    def __init__(self, receipt_id: str, operation: str = ""):
+        prefix = f"{operation}: " if operation else ""
+        super().__init__(
+            f"{prefix}no bound state for receipt '{receipt_id}'. "
+            f"Call client.bind_receipt(receipt=...) or "
+            f"client.bind_receipt(receipt_id='{receipt_id}', "
+            f"owner_identity=..., sig_alg=...) to prime the caches.",
+            details={"receipt_id": receipt_id, "operation": operation},
+        )
+        self.receipt_id = receipt_id
+        self.operation = operation
+
+
 class OperatorConflictError(OperatorError):
     """
     409 OPERATOR_ALREADY_EXISTS or MAX_OPERATORS_REACHED.

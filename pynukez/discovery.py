@@ -4,12 +4,15 @@ Discovery utilities for Nukez SDK.
 Provides functions for API discovery, health checking, and pricing.
 """
 
+import os
 import requests
 from typing import Dict, Any
 from .types import DiscoveryDoc, PriceInfo
 from .errors import NukezError
 
-def discover(base_url: str = "https://api.nukez.xyz", timeout: float = 10.0) -> DiscoveryDoc:
+_DEFAULT_BASE_URL = os.environ.get("NUKEZ_BASE_URL", "https://api.nukez.xyz")
+
+def discover(base_url: str = _DEFAULT_BASE_URL, timeout: float = 10.0) -> DiscoveryDoc:
     """
     Discover Nukez API capabilities.
     
@@ -44,7 +47,7 @@ def discover(base_url: str = "https://api.nukez.xyz", timeout: float = 10.0) -> 
     except requests.RequestException as e:
         raise NukezError(f"Discovery failed: {e}")
 
-def health_check(base_url: str = "https://api.nukez.xyz", timeout: float = 5.0) -> Dict[str, Any]:
+def health_check(base_url: str = _DEFAULT_BASE_URL, timeout: float = 5.0) -> Dict[str, Any]:
     """
     Check API health status [4].
     
@@ -81,7 +84,7 @@ def health_check(base_url: str = "https://api.nukez.xyz", timeout: float = 5.0) 
     except requests.RequestException as e:
         return {"healthy": False, "error": str(e)}
 
-def get_current_price(base_url: str = "https://api.nukez.xyz", units: int = 1) -> PriceInfo:
+def get_current_price(base_url: str = _DEFAULT_BASE_URL, units: int = 1) -> PriceInfo:
     """
     Get current storage pricing [4].
     

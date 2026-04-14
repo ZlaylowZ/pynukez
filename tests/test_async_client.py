@@ -262,25 +262,29 @@ class TestAsyncKeypairDualInit:
 
 
 class TestAsyncSetOwner:
-    """set_owner() pre-seeds the owner cache."""
+    """set_owner() pre-seeds owner state via bind_receipt()."""
 
     @patch("pynukez._async_client.Keypair")
     def test_set_owner_uses_signer_identity(self, mock_kp):
-        mock_kp.return_value.identity = "owner-pubkey"
+        real_ed25519 = "BhBeSkwKyqysZstzkqdf4qAcYfS9r27wEMmouvSVfp1U"
+        mock_kp.return_value.identity = real_ed25519
         mock_kp.return_value.sig_alg = "ed25519"
         mock_kp.return_value.sign.return_value = "sig"
         client = AsyncNukez(keypair_path="~/.config/solana/id.json")
         client.set_owner("receipt-123")
-        assert client._owner_cache["receipt-123"] == "owner-pubkey"
+        state = client._receipt_state["receipt-123"]
+        assert state.owner_identity == real_ed25519
+        assert state.sig_alg == "ed25519"
         assert client._is_delegating("receipt-123") is False
 
     @patch("pynukez._async_client.Keypair")
     def test_set_owner_explicit_identity(self, mock_kp):
-        mock_kp.return_value.identity = "different-pubkey"
+        real_ed25519_owner = "BhBeSkwKyqysZstzkqdf4qAcYfS9r27wEMmouvSVfp1U"
+        mock_kp.return_value.identity = "DifferentKeyHereMockedForSignerXxxxxxxxxx"
         mock_kp.return_value.sig_alg = "ed25519"
         client = AsyncNukez(keypair_path="~/.config/solana/id.json")
-        client.set_owner("receipt-123", identity="explicit-owner")
-        assert client._owner_cache["receipt-123"] == "explicit-owner"
+        client.set_owner("receipt-123", identity=real_ed25519_owner)
+        assert client._receipt_state["receipt-123"].owner_identity == real_ed25519_owner
 
     def test_set_owner_no_signer_raises(self):
         client = AsyncNukez()
@@ -289,19 +293,33 @@ class TestAsyncSetOwner:
 
     def test_set_owner_no_signer_with_explicit_identity(self):
         client = AsyncNukez()
-        client.set_owner("receipt-123", identity="some-owner")
-        assert client._owner_cache["receipt-123"] == "some-owner"
+        real_owner = "0x" + "c" * 40
+        client.set_owner("receipt-123", identity=real_owner)
+        state = client._receipt_state["receipt-123"]
+        assert state.owner_identity == real_owner
+        assert state.sig_alg == "secp256k1"
 
 
 class TestAsyncDualSignerParity:
     """Async client has dual-signer auto-selection like sync."""
 
     @patch("pynukez._async_client.Keypair")
-    def test_require_signer_returns_default(self, mock_kp):
+    def test_require_signer_returns_default_no_receipt(self, mock_kp):
         mock_kp.return_value.identity = "ed25519-key"
         mock_kp.return_value.sig_alg = "ed25519"
         client = AsyncNukez(keypair_path="~/.config/solana/id.json")
-        signer = client._require_signer("test", "some-receipt")
+        # Single-key client — no receipt_id needed → returns default signer
+        signer = client._require_signer("test", "")
+        assert signer is client._signer
+
+    @patch("pynukez._async_client.Keypair")
+    def test_single_key_cold_receipt_returns_signer(self, mock_kp):
+        """Single-key client: cold _receipt_state → returns default signer, no raise."""
+        mock_kp.return_value.identity = "ed25519-key"
+        mock_kp.return_value.sig_alg = "ed25519"
+        client = AsyncNukez(keypair_path="~/.config/solana/id.json")
+        assert client._evm_signer is None
+        signer = client._require_signer("test", "cold-receipt")
         assert signer is client._signer
 
     @patch("pynukez._async_client.Keypair")
@@ -312,9 +330,9 @@ class TestAsyncDualSignerParity:
         assert client._evm_signer is None
 
     @patch("pynukez._async_client.Keypair")
-    def test_sig_alg_cache_initialized(self, mock_kp):
+    def test_receipt_state_initialized(self, mock_kp):
         mock_kp.return_value.identity = "ed25519-key"
         mock_kp.return_value.sig_alg = "ed25519"
         client = AsyncNukez(keypair_path="~/.config/solana/id.json")
-        assert isinstance(client._sig_alg_cache, dict)
-        assert len(client._sig_alg_cache) == 0
+        assert isinstance(client._receipt_state, dict)
+        assert len(client._receipt_state) == 0

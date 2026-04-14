@@ -5,6 +5,7 @@ Batch 4D: SDK client method tests — verifies method signatures and public API 
 import pytest
 from unittest.mock import MagicMock, patch, call
 from pynukez.client import Nukez
+from pynukez.auth import _ReceiptState
 from pynukez.errors import NukezError
 
 
@@ -417,7 +418,9 @@ class TestDelegatingFlag:
         mock_signer = MagicMock()
         mock_signer.identity = "operator_pubkey_abc"
         client._signer = mock_signer
-        client._owner_cache["receipt_123"] = "owner_pubkey_xyz"
+        client._receipt_state["receipt_123"] = _ReceiptState(
+            owner_identity="owner_pubkey_xyz", sig_alg="ed25519"
+        )
 
         assert client._is_delegating("receipt_123") is True
 
@@ -428,20 +431,35 @@ class TestDelegatingFlag:
         mock_signer = MagicMock()
         mock_signer.identity = "owner_pubkey_xyz"
         client._signer = mock_signer
-        client._owner_cache["receipt_123"] = "owner_pubkey_xyz"
+        client._receipt_state["receipt_123"] = _ReceiptState(
+            owner_identity="owner_pubkey_xyz", sig_alg="ed25519"
+        )
 
         assert client._is_delegating("receipt_123") is False
 
     @patch("pynukez.client.Keypair")
-    def test_is_delegating_defaults_true_when_owner_unknown(self, mock_kp):
-        """Unknown owner (operator client that never provisioned) → True (safe default)."""
+    def test_is_delegating_defaults_true_when_owner_unknown_single_key(self, mock_kp):
+        """Single-key client + unknown owner → True (legacy safe default preserved)."""
         client = Nukez(keypair_path="~/.config/solana/id.json")
         mock_signer = MagicMock()
         mock_signer.identity = "operator_pubkey_abc"
         client._signer = mock_signer
-        # No entry in _owner_cache
-
+        # No entry in _receipt_state, no _evm_signer → legacy default
+        assert client._evm_signer is None
         assert client._is_delegating("unknown_receipt") is True
+
+    @patch("pynukez.client.Keypair")
+    def test_is_delegating_raises_on_cold_dual_key(self, mock_kp):
+        """Dual-key client + unknown receipt → ReceiptStateNotBoundError."""
+        from pynukez.errors import ReceiptStateNotBoundError
+
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        # Simulate dual-key by stubbing an EVM signer onto the client.
+        client._evm_signer = MagicMock()
+        client._evm_signer.identity = "0x" + "a" * 40
+        with pytest.raises(ReceiptStateNotBoundError) as exc_info:
+            client._is_delegating("unknown_receipt")
+        assert exc_info.value.receipt_id == "unknown_receipt"
 
     @patch("pynukez.client.build_signed_envelope")
     @patch("pynukez.client.Keypair")
@@ -458,7 +476,9 @@ class TestDelegatingFlag:
         mock_signer = MagicMock()
         mock_signer.identity = "operator_pubkey_abc"
         client._signer = mock_signer
-        client._owner_cache["receipt_123"] = "owner_pubkey_xyz"
+        client._receipt_state["receipt_123"] = _ReceiptState(
+            owner_identity="owner_pubkey_xyz", sig_alg="ed25519"
+        )
 
         client.list_files("receipt_123")
 
@@ -480,7 +500,9 @@ class TestDelegatingFlag:
         mock_signer = MagicMock()
         mock_signer.identity = "owner_pubkey_xyz"
         client._signer = mock_signer
-        client._owner_cache["receipt_123"] = "owner_pubkey_xyz"
+        client._receipt_state["receipt_123"] = _ReceiptState(
+            owner_identity="owner_pubkey_xyz", sig_alg="ed25519"
+        )
 
         client.list_files("receipt_123")
 
@@ -531,25 +553,30 @@ class TestKeypairDualInit:
 
 
 class TestSetOwner:
-    """set_owner() pre-seeds the owner cache."""
+    """set_owner() pre-seeds owner identity via bind_receipt()."""
 
     @patch("pynukez.client.Keypair")
     def test_set_owner_uses_signer_identity(self, mock_kp):
-        mock_kp.return_value.identity = "owner-pubkey"
+        # Use a real-format base58 Ed25519 pubkey so sig_alg can be inferred.
+        real_ed25519 = "BhBeSkwKyqysZstzkqdf4qAcYfS9r27wEMmouvSVfp1U"
+        mock_kp.return_value.identity = real_ed25519
         mock_kp.return_value.sig_alg = "ed25519"
         mock_kp.return_value.sign.return_value = "sig"
         client = Nukez(keypair_path="~/.config/solana/id.json")
         client.set_owner("receipt-123")
-        assert client._owner_cache["receipt-123"] == "owner-pubkey"
+        state = client._receipt_state["receipt-123"]
+        assert state.owner_identity == real_ed25519
+        assert state.sig_alg == "ed25519"
         assert client._is_delegating("receipt-123") is False
 
     @patch("pynukez.client.Keypair")
     def test_set_owner_explicit_identity(self, mock_kp):
-        mock_kp.return_value.identity = "different-pubkey"
+        real_ed25519_owner = "BhBeSkwKyqysZstzkqdf4qAcYfS9r27wEMmouvSVfp1U"
+        mock_kp.return_value.identity = "DifferentKeyHereMockedForSignerXxxxxxxxxx"
         mock_kp.return_value.sig_alg = "ed25519"
         client = Nukez(keypair_path="~/.config/solana/id.json")
-        client.set_owner("receipt-123", identity="explicit-owner")
-        assert client._owner_cache["receipt-123"] == "explicit-owner"
+        client.set_owner("receipt-123", identity=real_ed25519_owner)
+        assert client._receipt_state["receipt-123"].owner_identity == real_ed25519_owner
 
     def test_set_owner_no_signer_raises(self):
         client = Nukez()
@@ -558,5 +585,8 @@ class TestSetOwner:
 
     def test_set_owner_no_signer_with_explicit_identity(self):
         client = Nukez()
-        client.set_owner("receipt-123", identity="some-owner")
-        assert client._owner_cache["receipt-123"] == "some-owner"
+        real_owner = "0x" + "c" * 40
+        client.set_owner("receipt-123", identity=real_owner)
+        state = client._receipt_state["receipt-123"]
+        assert state.owner_identity == real_owner
+        assert state.sig_alg == "secp256k1"  # inferred from 0x prefix
