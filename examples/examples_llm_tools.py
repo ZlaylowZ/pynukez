@@ -4,8 +4,9 @@ LLM integration - use Nukez as tools for your AI agent.
 This example shows how to wire up Nukez with OpenAI function calling.
 
 Run:
+    pip install openai
     export OPENAI_API_KEY=your_key
-    python examples/llm_tools.py "Store a note that says hello"
+    python examples/examples_llm_tools.py "Store a note that says hello"
 """
 
 import json
@@ -46,7 +47,14 @@ def run_tool(name, args):
         return {"upload_url": r.upload_url, "download_url": r.download_url, "filename": r.filename}
     
     elif name == "nukez_upload_bytes":
-        storage.upload_bytes(args["upload_url"], args["data"])
+        # LLM tool-calling always passes strings through JSON, so route to
+        # upload_string() which sanitizes common agent formatting artifacts
+        # (JSON wrappers, markdown fencing) and encodes to UTF-8.
+        data = args["data"]
+        if isinstance(data, str):
+            storage.upload_string(args["upload_url"], data, content_type=args.get("content_type"))
+        else:
+            storage.upload_bytes(args["upload_url"], data, content_type=args.get("content_type"))
         return {"done": True}
 
     elif name == "nukez_upload_file_path":

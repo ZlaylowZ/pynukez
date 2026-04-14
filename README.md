@@ -1,10 +1,18 @@
 # PyNukez
 
-**Persistent storage for AI agents. Pay with SOL, store anything, get cryptographic proof.**
+**Persistent storage for AI agents. Pay with SOL or MON, store anything, get cryptographic proof.**
+
+[![PyPI](https://img.shields.io/pypi/v/pynukez.svg)](https://pypi.org/project/pynukez/)
+[![Python](https://img.shields.io/pypi/pyversions/pynukez.svg)](https://pypi.org/project/pynukez/)
+[![License](https://img.shields.io/pypi/l/pynukez.svg)](https://github.com/ZlaylowZ/pynukez/blob/main/LICENSE)
 
 ```bash
-pip install pynukez[solana]
+pip install pynukez[solana]        # Solana payments (SOL, USDC, USDT)
+pip install pynukez[evm]            # EVM payments (MON on Monad, WETH)
+pip install pynukez[all]            # Both
 ```
+
+Requires Python 3.9+.
 
 ## 30-Second Example
 
@@ -13,8 +21,8 @@ from pynukez import Nukez
 
 client = Nukez(keypair_path="~/.config/solana/id.json")
 
-# Buy storage
-request = client.request_storage()
+# Buy storage (3-step x402 payment flow)
+request = client.request_storage(units=1)
 transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
 receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
 
@@ -26,6 +34,18 @@ data = client.download_bytes(urls.download_url)  # b"Hello!"
 ```
 
 **That's it.** Your agent now has permanent storage with a cryptographic receipt.
+
+### Async version
+
+```python
+from pynukez import AsyncNukez
+
+async with AsyncNukez(keypair_path="~/.config/solana/id.json") as client:
+    request = await client.request_storage(units=1)
+    transfer = await client.solana_transfer(request.pay_to_address, request.amount_sol)
+    receipt = await client.confirm_storage(request.pay_req_id, transfer.signature)
+    # ... same methods as sync, just awaited
+```
 
 ---
 
@@ -86,16 +106,24 @@ print(data)  # b"My agent's data"
 
 | What you want | Code |
 |--------------|------|
-| Buy storage | `request = client.request_storage()` |
-| Pay | `transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)` |
+| Buy storage | `request = client.request_storage(units=1)` |
+| Pay (Solana) | `transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)` |
+| Pay (EVM/Monad) | `transfer = client.evm_transfer(request.pay_to_address, request.amount_raw, pay_asset=request.pay_asset, token_address=request.token_address, network=request.network)` |
 | Get receipt | `receipt = client.confirm_storage(request.pay_req_id, transfer.signature)` |
 | Setup locker | `client.provision_locker(receipt.id)` |
-| Store data | `urls = client.create_file(receipt.id, "file.txt")` then `client.upload_bytes(urls.upload_url, data)` |
+| Store bytes | `urls = client.create_file(receipt.id, "file.txt")` then `client.upload_bytes(urls.upload_url, data)` |
+| Store file | `client.upload_file_path(receipt.id, "/path/to/file.pdf")` |
+| Batch upload | `client.bulk_upload_paths(receipt.id, [{"filepath": "a.pdf"}, {"filepath": "b.txt"}])` |
+| Store directory | `client.upload_directory(receipt.id, "/path/to/dir", pattern="*.pdf", recursive=True)` |
+| Confirm hash | `client.confirm_file(receipt.id, "file.txt", confirm_url=urls.confirm_url)` |
 | Get data | `data = client.download_bytes(urls.download_url)` |
 | List files | `files = client.list_files(receipt.id)` |
 | Delete file | `client.delete_file(receipt.id, "file.txt")` |
 | Verify | `result = client.verify_storage(receipt.id)` |
+| Attest | `att = client.attest(receipt.id)` |
 | Merkle proof | `proof = client.get_merkle_proof(receipt.id, "file.txt")` |
+| Delegate | `client.add_operator(receipt.id, operator_pubkey)` |
+| Viewer link | `client.get_owner_viewer_url(receipt.id)` |
 
 ---
 
@@ -177,9 +205,11 @@ client = Nukez(keypair_path="~/.config/solana/id.json", network="mainnet-beta")
 
 ## Links
 
+- [Full SDK Reference](./docs/SDK_REFERENCE.md) — Every method, type, and error documented
 - [Examples](./examples/) — Working code you can copy
-- [API Reference](./docs/API.md) — Every method explained
-- [Source Code](./pynukez/) — Read it yourself
+- [PyPI](https://pypi.org/project/pynukez/) — Published releases
+- [GitHub](https://github.com/ZlaylowZ/pynukez) — Source code, issues, releases
+- [Contributing](./CONTRIBUTING.md) — Dev setup and PR workflow
 
 ---
 
