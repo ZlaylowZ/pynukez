@@ -142,6 +142,15 @@ class EVMSigner:
         with open(p) as f:
             data = json.load(f)
 
+        # Detect V3 encrypted keystores (have "crypto" field) — give a clear
+        # error instead of the generic "No private_key found" message.
+        if "crypto" in data and "private_key" not in data:
+            raise NukezError(
+                f"Encrypted V3 keystore detected at {p}. "
+                f"PyNukez requires a plaintext key file. "
+                f"Expected JSON format: {{\"address\": \"0x...\", \"private_key\": \"0x...\"}}"
+            )
+
         private_key = data.get("private_key") or data.get("privateKey") or ""
         address = data.get("address", "")
 

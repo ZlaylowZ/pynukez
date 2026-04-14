@@ -34,7 +34,7 @@ from .errors import (
 
 # Standard headers shared by sync and async clients
 STANDARD_HEADERS = {
-    "User-Agent": "nukez-sdk/3.3.0",
+    "User-Agent": "nukez-sdk/3.4.0",
     "Accept": "application/json",
     "Content-Type": "application/json",
 }
@@ -350,8 +350,11 @@ def handle_error_response(response) -> None:
             locker_id = error_details.get("locker_id", "")
             raise NukezFileNotFoundError(filename=filename, locker_id=locker_id)
 
+        # Use response.url.path (not full URL) to avoid leaking query-string
+        # credentials like receipt_id from confirm_url.
+        fallback = getattr(response.url, "path", "resource")
         raise NukezError(
-            f"Resource not found: {error_details.get('message', str(response.url))}",
+            f"Resource not found: {error_details.get('message', fallback)}",
             details=error_details
         )
 

@@ -121,7 +121,12 @@ class FileUrls:
     download_url: str
     content_type: str
     expires_in_sec: int
-    
+    # Absolute confirm URL from the gateway (new in gateway Phase N-4).
+    # POST to this after upload to populate content_hash in the manifest.
+    # No signed envelope required — receipt_id in the URL is the bearer auth.
+    # None when talking to older gateways that don't return this field.
+    confirm_url: Optional[str] = None
+
     # Agent guidance
     next_steps: str = (
         "PUT your raw bytes to upload_url via upload_bytes(upload_url=<the upload_url above>, "

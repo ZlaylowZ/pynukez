@@ -967,6 +967,7 @@ class AsyncNukez:
             download_url=response["download_url"],
             content_type=response.get("content_type", content_type),
             expires_in_sec=response.get("urls_expire_in_sec", ttl_min * 60),
+            confirm_url=response.get("confirm_url"),
         )
 
     async def create_files_batch(
@@ -1191,7 +1192,13 @@ class AsyncNukez:
 
         confirmed_map: Dict[str, ConfirmResult] = {}
         if confirm and uploaded_names:
-            confirm_result = await self.confirm_files(receipt_id, uploaded_names)
+            # Prefer gateway-provided confirm_batch_url when available.
+            # Older gateways omit it — confirm_files() falls back to the
+            # hardcoded path in that case.
+            confirm_batch_url = create_response.get("confirm_batch_url")
+            confirm_result = await self.confirm_files(
+                receipt_id, uploaded_names, confirm_batch_url=confirm_batch_url,
+            )
             confirmed_map = {
                 c.filename: c
                 for c in confirm_result.results
@@ -1881,6 +1888,7 @@ class AsyncNukez:
             download_url=response["download_url"],
             content_type=response.get("content_type", "application/octet-stream"),
             expires_in_sec=response.get("expires_in_sec", ttl_min * 60),
+            confirm_url=response.get("confirm_url"),
         )
 
     async def delete_file(self, receipt_id: str, filename: str) -> DeleteResult:
@@ -1961,11 +1969,49 @@ class AsyncNukez:
             params={"receipt_id": receipt_id, "filename": filename},
         )
 
-    async def confirm_file(self, receipt_id: str, filename: str) -> ConfirmResult:
-        """Confirm a file upload by computing its content hash server-side."""
-        response = await self.http.post(
+    async def _post_confirm(
+        self,
+        confirm_url: Optional[str],
+        fallback_path: str,
+        fallback_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        POST to a confirm endpoint. Prefers the absolute confirm_url returned
+        by create_file/create_files_batch; falls back to the hardcoded path.
+
+        Gateway confirm routes are public-by-receipt_id — no envelope required.
+        """
+        if confirm_url:
+            try:
+                resp = await self._raw_client.post(confirm_url, timeout=self.timeout)
+                if resp.status_code >= 400:
+                    from ._http import handle_error_response
+                    handle_error_response(resp)
+                return resp.json()
+            except _httpx.TimeoutException:
+                raise NukezError(f"Request timed out after {self.timeout}s: POST confirm")
+            except _httpx.HTTPError as e:
+                raise NukezError(f"Request failed: POST confirm: {e}")
+        return await self.http.post(fallback_path, params=fallback_params)
+
+    async def confirm_file(
+        self,
+        receipt_id: str,
+        filename: str,
+        confirm_url: Optional[str] = None,
+    ) -> ConfirmResult:
+        """Confirm a file upload by computing its content hash server-side.
+
+        Args:
+            receipt_id: Receipt ID from confirm_storage()
+            filename: Name of the file to confirm
+            confirm_url: Optional absolute confirm URL from create_file() response.
+                Prefers this when provided; falls back to hardcoded path otherwise.
+        """
+        response = await self._post_confirm(
+            confirm_url,
             "/v1/files/confirm",
-            params={"receipt_id": receipt_id, "filename": filename},
+            {"receipt_id": receipt_id, "filename": filename},
         )
 
         return ConfirmResult(
@@ -1975,14 +2021,24 @@ class AsyncNukez:
             confirmed=True,
         )
 
-    async def confirm_files(self, receipt_id: str, filenames: List[str]) -> BatchConfirmResult:
-        """Confirm multiple file uploads in a single operation."""
-        response = await self.http.post(
+    async def confirm_files(
+        self,
+        receipt_id: str,
+        filenames: List[str],
+        confirm_batch_url: Optional[str] = None,
+    ) -> BatchConfirmResult:
+        """Confirm multiple file uploads in a single operation.
+
+        Args:
+            receipt_id: Receipt ID from confirm_storage()
+            filenames: List of filenames to confirm
+            confirm_batch_url: Optional absolute confirm URL from
+                create_files_batch() response.
+        """
+        response = await self._post_confirm(
+            confirm_batch_url,
             "/v1/files/confirm-batch",
-            params={
-                "receipt_id": receipt_id,
-                "filenames": filenames,
-            },
+            {"receipt_id": receipt_id, "filenames": filenames},
         )
 
         results = []
