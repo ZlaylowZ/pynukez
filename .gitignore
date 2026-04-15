@@ -1,0 +1,44 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Jupyter — notebooks are local scratch; pynukez ships as a pure Python package
+*.ipynb
+.ipynb_checkpoints/
+
+# pip-install-from-requirements mis-parse artifacts (e.g. `pip install httpx=0.24.0`)
+=*
+
+# Local agent / tooling scratch
+.claude/
+PLAN.md
+
+# Test output
+test_reports/
+.coverage
+.pytest_cache/
