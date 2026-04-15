@@ -244,7 +244,7 @@ class TestAsyncDownloadRetry:
         mock_resp.raise_for_status = MagicMock()
         async_client._raw_client.get = AsyncMock(return_value=mock_resp)
 
-        result = await async_client.download_bytes("https://api.nukez.xyz/f/tok123")
+        result = await async_client.download_bytes("https://storage.googleapis.com/bucket/obj")
         assert result == b"hello"
         assert async_client._raw_client.get.call_count == 1
 
@@ -260,10 +260,133 @@ class TestAsyncDownloadRetry:
 
         async_client._raw_client.get = AsyncMock(side_effect=[resp_404, resp_200])
 
-        result = await async_client.download_bytes("https://api.nukez.xyz/f/tok123")
+        result = await async_client.download_bytes("https://storage.googleapis.com/bucket/obj")
         assert result == b"propagated"
         assert async_client._raw_client.get.call_count == 2
         mock_sleep.assert_called_once_with(2.0)
+
+    async def test_download_bytes_preflights_short_url(self, async_client):
+        """Async: gateway short URL → preflight GET → body GET to resolved URL."""
+        resolved = "https://storage.googleapis.com/bucket/obj?X-Goog-Signature=abc"
+
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {"Location": resolved}
+
+        body_resp = MagicMock()
+        body_resp.status_code = 200
+        body_resp.content = b"x" * (40 * 1024 * 1024)  # 40 MB
+        body_resp.raise_for_status = MagicMock()
+
+        async_client._raw_client.get = AsyncMock(side_effect=[preflight, body_resp])
+
+        result = await async_client.download_bytes("https://api.nukez.xyz/f/abcdef")
+
+        assert result == body_resp.content
+        calls = async_client._raw_client.get.call_args_list
+        assert calls[0].args[0] == "https://api.nukez.xyz/f/abcdef"
+        assert calls[0].kwargs["follow_redirects"] is False
+        assert calls[1].args[0] == resolved
+
+    async def test_download_bytes_raises_on_redirect_without_location(self, async_client):
+        """Async: gateway 307 without Location header → NukezError."""
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {}
+        async_client._raw_client.get = AsyncMock(return_value=preflight)
+
+        with pytest.raises(NukezError, match="no Location header"):
+            await async_client.download_bytes("https://api.nukez.xyz/f/abcdef")
+
+        assert async_client._raw_client.get.call_count == 1
+
+
+class TestAsyncDownloadToFile:
+    """Test the streaming download_to_file method (async)."""
+
+    async def test_download_to_file_streams_to_disk(self, async_client, tmp_path):
+        """Streams chunks into a destination file, returns size/hash metadata."""
+        import hashlib as _hashlib
+
+        payload = b"".join(bytes([i % 256] * 1024) for i in range(1024))  # 1 MB
+        expected_hash = _hashlib.sha256(payload).hexdigest()
+
+        stream_resp = MagicMock()
+        stream_resp.status_code = 200
+        stream_resp.raise_for_status = MagicMock()
+
+        async def _aiter(chunk_size):
+            yield payload[: 512 * 1024]
+            yield payload[512 * 1024 :]
+
+        stream_resp.aiter_bytes = _aiter
+
+        stream_ctx = MagicMock()
+        stream_ctx.__aenter__ = AsyncMock(return_value=stream_resp)
+        stream_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        async_client._raw_client.stream = MagicMock(return_value=stream_ctx)
+
+        dest = tmp_path / "out.bin"
+        result = await async_client.download_to_file(
+            "https://storage.googleapis.com/bucket/obj",
+            dest,
+        )
+
+        async_client._raw_client.stream.assert_called_once()
+        call = async_client._raw_client.stream.call_args
+        assert call.args[0] == "GET"
+        assert call.args[1] == "https://storage.googleapis.com/bucket/obj"
+
+        assert dest.exists()
+        assert dest.read_bytes() == payload
+        assert result["size_bytes"] == len(payload)
+        assert result["content_hash"] == f"sha256:{expected_hash}"
+        assert result["attempts"] == 1
+
+    async def test_download_to_file_preflights_short_url(self, async_client, tmp_path):
+        """Async: gateway short URL → preflight → stream from resolved URL."""
+        resolved = "https://storage.googleapis.com/bucket/obj?X-Goog-Signature=xyz"
+
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {"Location": resolved}
+        async_client._raw_client.get = AsyncMock(return_value=preflight)
+
+        stream_resp = MagicMock()
+        stream_resp.status_code = 200
+        stream_resp.raise_for_status = MagicMock()
+
+        async def _aiter(chunk_size):
+            yield b"chunk"
+
+        stream_resp.aiter_bytes = _aiter
+
+        stream_ctx = MagicMock()
+        stream_ctx.__aenter__ = AsyncMock(return_value=stream_resp)
+        stream_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        async_client._raw_client.stream = MagicMock(return_value=stream_ctx)
+
+        dest = tmp_path / "out.bin"
+        result = await async_client.download_to_file(
+            "https://api.nukez.xyz/f/abcdef",
+            dest,
+            verify_hash=False,
+        )
+
+        # Preflight GET to the short URL
+        pf_call = async_client._raw_client.get.call_args
+        assert pf_call.args[0] == "https://api.nukez.xyz/f/abcdef"
+        assert pf_call.kwargs["follow_redirects"] is False
+
+        # Stream to the resolved URL
+        stream_call = async_client._raw_client.stream.call_args
+        assert stream_call.args[1] == resolved
+
+        assert dest.read_bytes() == b"chunk"
+        assert result["download_url"] == "https://api.nukez.xyz/f/abcdef"
+        assert result["content_hash"] == ""
 
 
 class TestAsyncContextManager:

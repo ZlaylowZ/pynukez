@@ -158,7 +158,7 @@ class TestDownloadBytesRetry:
 
         client._raw_client = MagicMock()
         client._raw_client.get = MagicMock(return_value=mock_resp)
-        result = client.download_bytes("https://api.nukez.xyz/f/tok123")
+        result = client.download_bytes("https://storage.googleapis.com/bucket/obj")
 
         assert result == b"hello world"
         assert client._raw_client.get.call_count == 1
@@ -179,7 +179,7 @@ class TestDownloadBytesRetry:
 
         client._raw_client = MagicMock()
         client._raw_client.get = MagicMock(side_effect=[resp_404, resp_200])
-        result = client.download_bytes("https://api.nukez.xyz/f/tok123")
+        result = client.download_bytes("https://storage.googleapis.com/bucket/obj")
 
         assert result == b"propagated data"
         assert client._raw_client.get.call_count == 2
@@ -210,7 +210,7 @@ class TestDownloadBytesRetry:
             side_effect=[resp_404_ok, resp_404_ok, resp_404_ok, resp_404_final]
         )
         with pytest.raises(NukezError, match="404"):
-            client.download_bytes("https://api.nukez.xyz/f/tok123")
+            client.download_bytes("https://storage.googleapis.com/bucket/obj")
 
         # 3 retries → sleeps at 2s, 4s, 8s
         assert mock_sleep.call_count == 3
@@ -233,7 +233,7 @@ class TestDownloadBytesRetry:
         client._raw_client = MagicMock()
         client._raw_client.get = MagicMock(return_value=mock_resp)
         with pytest.raises(NukezError, match="expired or malformed"):
-            client.download_bytes("https://api.nukez.xyz/f/tok123")
+            client.download_bytes("https://storage.googleapis.com/bucket/obj")
 
         assert client._raw_client.get.call_count == 1
 
@@ -254,7 +254,7 @@ class TestDownloadBytesRetry:
         client._raw_client.get = MagicMock(return_value=mock_resp)
         with pytest.raises(NukezError, match="404"):
             client.download_bytes(
-                "https://api.nukez.xyz/f/tok123", max_retries=0
+                "https://storage.googleapis.com/bucket/obj", max_retries=0
             )
 
         assert client._raw_client.get.call_count == 1
@@ -278,7 +278,7 @@ class TestDownloadBytesRetry:
         client._raw_client.get = MagicMock(
             side_effect=[resp_404, resp_404, resp_404, resp_200]
         )
-        result = client.download_bytes("https://api.nukez.xyz/f/tok123")
+        result = client.download_bytes("https://storage.googleapis.com/bucket/obj")
 
         assert result == b"ok"
         assert mock_sleep.call_args_list == [call(2.0), call(4.0), call(8.0)]
@@ -316,7 +316,7 @@ class TestDownloadBytesRetry:
             side_effect=[resp_404, resp_404, resp_404, mock_resp]
         )
         with pytest.raises(NukezError) as exc_info:
-            client.download_bytes("https://api.nukez.xyz/f/tok123")
+            client.download_bytes("https://storage.googleapis.com/bucket/obj")
 
         err = exc_info.value
         assert "arweave" in err.message
@@ -353,6 +353,169 @@ class TestDownloadBytesRetry:
         assert err.details.get("retryable") is True
         # Should NOT have propagation-specific fields
         assert "error_code" not in err.details
+
+    @patch("pynukez.client.Keypair")
+    def test_download_bytes_preflights_short_url_and_downloads_from_resolved(self, mock_kp):
+        """Gateway short URL triggers preflight GET that resolves to the
+        underlying signed storage URL; the body download runs against the
+        resolved URL, bypassing Cloud Run."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        resolved = "https://storage.googleapis.com/bucket/obj?X-Goog-Signature=abc"
+
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {"Location": resolved}
+
+        body_resp = MagicMock()
+        body_resp.status_code = 200
+        body_resp.content = b"x" * (40 * 1024 * 1024)  # 40 MB
+        body_resp.raise_for_status = MagicMock()
+
+        client._raw_client = MagicMock()
+        client._raw_client.get = MagicMock(side_effect=[preflight, body_resp])
+
+        result = client.download_bytes("https://api.nukez.xyz/f/abcdef")
+
+        # Preflight: bodyless GET to short URL with follow_redirects=False
+        preflight_call = client._raw_client.get.call_args_list[0]
+        assert preflight_call.args[0] == "https://api.nukez.xyz/f/abcdef"
+        assert preflight_call.kwargs["follow_redirects"] is False
+
+        # Body download: plain GET to resolved URL
+        body_call = client._raw_client.get.call_args_list[1]
+        assert body_call.args[0] == resolved
+
+        assert result == body_resp.content
+        assert len(result) == 40 * 1024 * 1024
+
+    @patch("pynukez.client.Keypair")
+    def test_download_bytes_raises_on_redirect_without_location(self, mock_kp):
+        """Gateway 307 with no Location header → NukezError, no body download."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {}
+        client._raw_client = MagicMock()
+        client._raw_client.get = MagicMock(return_value=preflight)
+
+        with pytest.raises(NukezError, match="no Location header"):
+            client.download_bytes("https://api.nukez.xyz/f/abcdef")
+
+        # Only the preflight ran — no body download attempted.
+        assert client._raw_client.get.call_count == 1
+
+
+class TestDownloadToFile:
+    """Verify the streaming download_to_file method."""
+
+    @patch("pynukez.client.Keypair")
+    def test_download_to_file_streams_to_disk(self, mock_kp, tmp_path):
+        """download_to_file streams chunks into a destination file and returns
+        size/hash metadata. No body is buffered in memory (no .content access)."""
+        import hashlib as _hashlib
+
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        payload = b"".join(bytes([i % 256] * 1024) for i in range(1024))  # 1 MB
+        expected_hash = _hashlib.sha256(payload).hexdigest()
+
+        stream_resp = MagicMock()
+        stream_resp.status_code = 200
+        stream_resp.raise_for_status = MagicMock()
+        stream_resp.iter_bytes = MagicMock(return_value=iter([payload[:512 * 1024], payload[512 * 1024:]]))
+
+        stream_ctx = MagicMock()
+        stream_ctx.__enter__ = MagicMock(return_value=stream_resp)
+        stream_ctx.__exit__ = MagicMock(return_value=False)
+
+        client._raw_client = MagicMock()
+        client._raw_client.stream = MagicMock(return_value=stream_ctx)
+
+        dest = tmp_path / "out.bin"
+        result = client.download_to_file(
+            "https://storage.googleapis.com/bucket/obj",
+            dest,
+        )
+
+        # stream() was called with GET and the URL (no preflight for non-short URL)
+        client._raw_client.stream.assert_called_once()
+        call = client._raw_client.stream.call_args
+        assert call.args[0] == "GET"
+        assert call.args[1] == "https://storage.googleapis.com/bucket/obj"
+
+        # File written to disk
+        assert dest.exists()
+        assert dest.read_bytes() == payload
+
+        # Return metadata
+        assert result["dest_path"] == str(dest)
+        assert result["size_bytes"] == len(payload)
+        assert result["content_hash"] == f"sha256:{expected_hash}"
+        assert result["download_url"] == "https://storage.googleapis.com/bucket/obj"
+        assert result["attempts"] == 1
+
+    @patch("pynukez.client.Keypair")
+    def test_download_to_file_preflights_short_url(self, mock_kp, tmp_path):
+        """download_to_file resolves the 307 redirect for gateway short URLs,
+        then streams from the resolved URL."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        resolved = "https://storage.googleapis.com/bucket/obj?X-Goog-Signature=xyz"
+
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {"Location": resolved}
+
+        stream_resp = MagicMock()
+        stream_resp.status_code = 200
+        stream_resp.raise_for_status = MagicMock()
+        stream_resp.iter_bytes = MagicMock(return_value=iter([b"chunk"]))
+
+        stream_ctx = MagicMock()
+        stream_ctx.__enter__ = MagicMock(return_value=stream_resp)
+        stream_ctx.__exit__ = MagicMock(return_value=False)
+
+        client._raw_client = MagicMock()
+        client._raw_client.get = MagicMock(return_value=preflight)
+        client._raw_client.stream = MagicMock(return_value=stream_ctx)
+
+        dest = tmp_path / "out.bin"
+        result = client.download_to_file(
+            "https://api.nukez.xyz/f/abcdef",
+            dest,
+            verify_hash=False,
+        )
+
+        # Preflight GET fired once with follow_redirects=False
+        client._raw_client.get.assert_called_once()
+        pf_call = client._raw_client.get.call_args
+        assert pf_call.args[0] == "https://api.nukez.xyz/f/abcdef"
+        assert pf_call.kwargs["follow_redirects"] is False
+
+        # Stream targeted the resolved URL, not the short URL
+        stream_call = client._raw_client.stream.call_args
+        assert stream_call.args[1] == resolved
+
+        assert dest.read_bytes() == b"chunk"
+        # Original URL returned, not resolved
+        assert result["download_url"] == "https://api.nukez.xyz/f/abcdef"
+        assert result["size_bytes"] == 5
+        # verify_hash=False → empty content_hash
+        assert result["content_hash"] == ""
+
+    @patch("pynukez.client.Keypair")
+    def test_download_to_file_raises_if_parent_missing(self, mock_kp, tmp_path):
+        """download_to_file refuses to stream into a non-existent directory."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        client._raw_client = MagicMock()
+
+        missing_dir = tmp_path / "does_not_exist"
+        with pytest.raises(NukezError, match="Parent directory does not exist"):
+            client.download_to_file(
+                "https://storage.googleapis.com/bucket/obj",
+                missing_dir / "out.bin",
+            )
+
+        # No HTTP calls made — rejected at validation.
+        client._raw_client.stream.assert_not_called()
 
 
 class TestUploadBytesContentType:

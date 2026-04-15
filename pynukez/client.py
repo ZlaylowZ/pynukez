@@ -2090,6 +2090,45 @@ class Nukez:
 
         return self.upload_bytes(upload_url, cleaned.encode("utf-8"), content_type)
     
+    def _resolve_gateway_download_url(self, download_url: str) -> str:
+        """Resolve a gateway short URL (/f/{token}) to its underlying signed
+        storage URL by preflighting a bodyless GET with follow_redirects=False.
+
+        Returns the resolved URL when a 307/308 is received. For non-short URLs
+        or responses that are not redirects, returns the original URL unchanged
+        so the caller can fall through to its normal GET path.
+
+        This exists because Cloud Run enforces a response streaming limit on
+        the gateway's /f/{token} proxy path at the infrastructure layer. For
+        files large enough to trip that limit, the proxy path either truncates
+        or 500s. Resolving the redirect and GETting directly from the signed
+        storage URL bypasses Cloud Run entirely — the same pattern used by
+        upload_bytes for the parallel 32 MB request body limit.
+
+        Raises:
+            NukezError: Gateway returned a redirect with no Location header.
+        """
+        if not _is_gateway_short_url(download_url):
+            return download_url
+
+        preflight = self._raw_client.get(download_url, follow_redirects=False)
+        if preflight.status_code in (307, 308):
+            resolved = preflight.headers.get("Location")
+            if not resolved:
+                raise NukezError(
+                    f"Gateway returned {preflight.status_code} with no "
+                    f"Location header for {download_url}. Cannot resolve "
+                    f"download target."
+                )
+            return resolved
+        if preflight.status_code >= 400:
+            # Don't raise here — let the existing GET path handle the error
+            # with its structured 404 retry / CONTENT_PROPAGATION_PENDING
+            # message. Fall through to the short URL.
+            return download_url
+        # 200/204 — old gateway or direct-serve path. Fall through.
+        return download_url
+
     def download_bytes(
         self,
         download_url: str,
@@ -2097,13 +2136,18 @@ class Nukez:
         initial_delay: float = 2.0,
     ) -> bytes:
         """
-        Download data from signed URL.
+        Download data from signed URL into memory.
 
         Includes retry with exponential backoff on HTTP 404.  Content-addressed
         storage providers (Arweave, Filecoin) may return 404 for seconds after
         upload while data propagates through their indexing layers.  The gateway
         also retries server-side (P0), but this provides a defensive fallback
         when the SDK hits provider URLs directly.
+
+        For files that may exceed available RAM, or when Cloud Run's response
+        streaming limit on the /f/{token} proxy would truncate the download,
+        use ``download_to_file`` instead — it streams chunk-by-chunk to disk
+        and does not buffer the full body in memory.
 
         Args:
             download_url: URL from create_file() or get_file_urls()
@@ -2117,11 +2161,23 @@ class Nukez:
             NukezError: If URL is malformed, download fails after retries, or
                 a non-retryable HTTP error occurs.
                 Error message includes recovery steps.
+
+        Cloud Run proxy bypass:
+            When download_url is a gateway short URL (/f/{token}), this method
+            first resolves the 307 redirect to the underlying signed storage
+            URL and GETs from there directly. This bypasses Cloud Run's
+            response streaming limit on the gateway proxy path. Resolution
+            happens once, before the retry loop — subsequent retries hit the
+            resolved URL directly.
         """
         # Validate URL before making the request
         url_err = validate_signed_url(download_url, "download_url")
         if url_err:
             raise NukezError(url_err)
+
+        # Resolve gateway short URL once. Retries hit the resolved URL
+        # directly, within its signed URL TTL.
+        target_url = self._resolve_gateway_download_url(download_url)
 
         max_attempts = 1 + max_retries
         for attempt in range(max_attempts):
@@ -2134,7 +2190,7 @@ class Nukez:
                 time.sleep(delay)
 
             try:
-                response = self._raw_client.get(download_url)
+                response = self._raw_client.get(target_url)
                 if response.status_code == 404 and attempt < max_attempts - 1:
                     continue
                 response.raise_for_status()
@@ -2185,7 +2241,134 @@ class Nukez:
             "Call confirm_file(receipt_id, filename) to verify availability, then retry.",
             details={"retryable": True, "status": 404},
         )
-    
+
+    def download_to_file(
+        self,
+        download_url: str,
+        dest_path: Union[str, Path],
+        chunk_size: int = 8 * 1024 * 1024,
+        max_retries: int = 3,
+        initial_delay: float = 2.0,
+        verify_hash: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Stream a signed download URL to disk chunk-by-chunk.
+
+        Unlike ``download_bytes``, this method does not buffer the full
+        response body in memory. Use it for files that may exceed available
+        RAM, or whenever the gateway's Cloud Run proxy path would otherwise
+        truncate the response due to its streaming limit.
+
+        For gateway short URLs (``/f/{token}``) the method first resolves the
+        307 redirect to the underlying signed storage URL and streams from
+        there directly, bypassing Cloud Run entirely. Non-gateway URLs (a
+        pre-resolved signed URL you already have in hand) skip the preflight
+        and stream directly.
+
+        Args:
+            download_url: URL from create_file() / get_file_urls() / list_files()
+            dest_path: Destination file path. Parent directory must exist.
+            chunk_size: Number of bytes read per iteration (default: 8 MiB).
+            max_retries: Retry attempts on HTTP 404 (default: 3). The retry
+                re-issues the whole GET from scratch, since mid-stream errors
+                cannot be resumed reliably.
+            initial_delay: Initial backoff in seconds, doubles each retry.
+            verify_hash: When True (default), compute SHA-256 of the streamed
+                bytes alongside writing to disk, and return it as the
+                ``content_hash`` field. Free to compute since the chunks are
+                already in hand.
+
+        Returns:
+            Dict with:
+              - download_url: The ORIGINAL URL passed in (not the resolved one)
+              - dest_path:    The absolute path where the file was written
+              - size_bytes:   Total bytes written
+              - content_hash: ``sha256:...`` (when verify_hash=True) or empty
+              - attempts:     Number of GET attempts consumed
+
+        Raises:
+            NukezError: URL validation failure, redirect without Location,
+                or exhausted retries on 404.
+            httpx.HTTPStatusError: Propagated for non-404 HTTP errors.
+            OSError: File write failure (disk full, permission denied, etc.).
+        """
+        url_err = validate_signed_url(download_url, "download_url")
+        if url_err:
+            raise NukezError(url_err)
+
+        dest = Path(dest_path).expanduser()
+        if not dest.parent.exists():
+            raise NukezError(
+                f"Parent directory does not exist: {dest.parent}. "
+                f"Create it before calling download_to_file()."
+            )
+
+        target_url = self._resolve_gateway_download_url(download_url)
+
+        max_attempts = 1 + max_retries
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                delay = initial_delay * (2 ** (attempt - 1))
+                logger.debug(
+                    "download_to_file returned 404, retrying in %ss (attempt %d/%d)",
+                    delay, attempt, max_retries,
+                )
+                time.sleep(delay)
+
+            try:
+                bytes_written = 0
+                hasher = hashlib.sha256() if verify_hash else None
+                with self._raw_client.stream("GET", target_url) as response:
+                    if response.status_code == 404 and attempt < max_attempts - 1:
+                        # Swallow the body (httpx requires consuming or
+                        # closing before the context exits) and retry.
+                        response.read()
+                        continue
+                    if response.status_code >= 400:
+                        response.read()  # load body so raise_for_status has it
+                        response.raise_for_status()
+                    with open(dest, "wb") as f:
+                        for chunk in response.iter_bytes(chunk_size=chunk_size):
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            if hasher is not None:
+                                hasher.update(chunk)
+                            bytes_written += len(chunk)
+
+                return {
+                    "download_url": download_url,
+                    "dest_path": str(dest),
+                    "size_bytes": bytes_written,
+                    "content_hash": (
+                        f"sha256:{hasher.hexdigest()}" if hasher is not None else ""
+                    ),
+                    "attempts": attempt + 1,
+                }
+            except _httpx.HTTPStatusError as e:
+                last_exc = e
+                status = e.response.status_code if e.response is not None else None
+                if status == 404:
+                    # Fall through to retry loop if attempts remain
+                    continue
+                if status in (400, 403):
+                    raise NukezError(
+                        f"download_to_file failed (HTTP {status}). The signed "
+                        f"URL may be expired or malformed. Call get_file_urls"
+                        f"(receipt_id=..., filename=...) for a fresh URL."
+                    ) from e
+                raise
+
+        raise NukezError(
+            "download_to_file failed (HTTP 404) after retries. The file may "
+            "still be propagating on a content-addressed provider. Call "
+            "confirm_file(receipt_id, filename) to verify availability, then "
+            "retry.",
+            details={"retryable": True, "status": 404},
+        ) from last_exc
+
     def list_files(self, receipt_id: str) -> List[FileInfo]:
         """
         List all files in locker.
