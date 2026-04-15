@@ -72,6 +72,7 @@ from ._helpers import (
     _sanitize_filename,
     _normalize_expected_sha256,
     _is_sandbox_path_unavailable_error,
+    _is_gateway_short_url,
     _normalize_viewer_base_url,
     _viewer_button_ui,
     _viewer_renderer_contract,
@@ -1960,7 +1961,7 @@ class Nukez:
     
     def upload_bytes(self, upload_url: str, data: bytes, content_type: str = None) -> UploadResult:
         """
-        Upload data to signed URL.
+        Upload data to a signed URL.
 
         Args:
             upload_url: URL from create_file() or get_file_urls()
@@ -1973,10 +1974,54 @@ class Nukez:
         Note:
             For agent/tool-calling use, prefer upload_string() which accepts
             a string and handles common formatting issues automatically.
+
+        Cloud Run 32 MB limit handling:
+            pynukez gateway short URLs (``https://.../f/{token}``) live behind
+            Cloud Run, which enforces a 32 MB request body limit at the
+            infrastructure layer. For files above that size, a one-shot PUT
+            to the short URL is rejected with HTTP 413 before the gateway
+            ever sees the body, so the 307 redirect to the underlying signed
+            URL is never emitted.
+
+            When the URL is a gateway short URL, this method first sends a
+            bodyless preflight PUT to resolve the 307 Location, then PUTs
+            the real body directly to the resolved signed URL, bypassing
+            Cloud Run. This matches the proven two-step curl workflow in
+            the test log and makes uploads of any size work uniformly. The
+            extra preflight round trip is parallelizable with other uploads
+            and adds ~50ms on a typical link.
+
+            URLs that do not look like gateway short URLs fall straight
+            through to a one-shot PUT — the escape hatch for callers who
+            already have a resolved storage URL.
         """
         headers = {"Content-Type": content_type or "application/octet-stream"}
 
-        response = self._raw_client.put(upload_url, content=data, headers=headers)
+        target_url = upload_url
+        if _is_gateway_short_url(upload_url):
+            preflight = self._raw_client.put(
+                upload_url,
+                content=b"",
+                headers=headers,
+                follow_redirects=False,
+            )
+            if preflight.status_code in (307, 308):
+                resolved = preflight.headers.get("Location")
+                if not resolved:
+                    raise NukezError(
+                        f"Gateway returned {preflight.status_code} with no "
+                        f"Location header for {upload_url}. Cannot resolve "
+                        f"upload target."
+                    )
+                target_url = resolved
+            elif preflight.status_code >= 400:
+                # Real error from the gateway: expired URL, bad token,
+                # signature mismatch, etc. Surface it instead of retrying.
+                preflight.raise_for_status()
+            # else: 200/204 — old gateway handled the empty PUT directly,
+            # fall through to the single-shot PUT at the short URL.
+
+        response = self._raw_client.put(target_url, content=data, headers=headers)
         response.raise_for_status()
 
         return UploadResult(

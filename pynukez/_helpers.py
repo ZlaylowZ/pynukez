@@ -11,8 +11,30 @@ import mimetypes
 import os
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from .errors import NukezError
+
+
+def _is_gateway_short_url(url: str) -> bool:
+    """Return True if ``url`` looks like a pynukez gateway short URL.
+
+    Gateway short URLs have the shape ``https://<gateway>/f/{token}``. They
+    live behind the gateway's Cloud Run endpoint, which enforces a 32 MB
+    request body limit at the infrastructure layer — so uploads for files
+    larger than that must first resolve the 307 redirect to the underlying
+    storage signed URL and PUT the body there directly, bypassing Cloud Run.
+
+    The caller is ``upload_bytes`` / its async equivalent, which preflights
+    a bodyless PUT when this returns True to extract the redirect target.
+    """
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    return parsed.path.startswith("/f/")
 
 # ---------------------------------------------------------------------------
 # Constants

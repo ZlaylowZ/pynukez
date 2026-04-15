@@ -74,6 +74,7 @@ from .errors import (
 )
 from .hardening import sanitize_upload_data, validate_signed_url
 from ._async_http import AsyncHTTPClient
+from ._helpers import _is_gateway_short_url
 from ._http import caip2_to_friendly
 
 VIEWER_RENDERER_CONTRACT_NAME = "nukez.mcp.viewer_link"
@@ -1680,10 +1681,37 @@ class AsyncNukez:
     # ------------------------------------------------------------------
 
     async def upload_bytes(self, upload_url: str, data: bytes, content_type: str = None) -> UploadResult:
-        """Upload data to signed URL."""
+        """Upload data to a signed URL.
+
+        Gateway short URLs (``/f/{token}``) are preflighted with a bodyless
+        PUT to resolve the 307 redirect to the underlying storage signed URL;
+        the body is then PUT directly to the resolved URL, bypassing Cloud
+        Run's 32 MB request body limit. See the sync client's upload_bytes
+        docstring for the full contract.
+        """
         headers = {"Content-Type": content_type or "application/octet-stream"}
 
-        response = await self._raw_client.put(upload_url, content=data, headers=headers)
+        target_url = upload_url
+        if _is_gateway_short_url(upload_url):
+            preflight = await self._raw_client.put(
+                upload_url,
+                content=b"",
+                headers=headers,
+                follow_redirects=False,
+            )
+            if preflight.status_code in (307, 308):
+                resolved = preflight.headers.get("Location")
+                if not resolved:
+                    raise NukezError(
+                        f"Gateway returned {preflight.status_code} with no "
+                        f"Location header for {upload_url}. Cannot resolve "
+                        f"upload target."
+                    )
+                target_url = resolved
+            elif preflight.status_code >= 400:
+                preflight.raise_for_status()
+
+        response = await self._raw_client.put(target_url, content=data, headers=headers)
         response.raise_for_status()
 
         return UploadResult(

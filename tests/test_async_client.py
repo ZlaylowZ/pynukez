@@ -121,6 +121,8 @@ class TestAsyncClientFileOps:
         assert result.upload_url == "https://storage.googleapis.com/upload"
 
     async def test_upload_bytes(self, async_client):
+        """Non-gateway URL (e.g. pre-resolved GCS URL) skips the preflight
+        and does a single direct PUT."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
@@ -132,6 +134,7 @@ class TestAsyncClientFileOps:
             content_type="text/plain",
         )
         assert result.size_bytes == 11
+        # No preflight — not a gateway /f/{token} URL.
         async_client._raw_client.put.assert_called_once()
 
     async def test_upload_bytes_default_content_type(self, async_client):
@@ -140,29 +143,87 @@ class TestAsyncClientFileOps:
         GCS signed URLs include content-type in X-Goog-SignedHeaders.
         The Content-Type must match what create_file signed into the URL.
         """
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        async_client._raw_client.put = AsyncMock(return_value=mock_resp)
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {"Location": "https://storage.googleapis.com/signed-url"}
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.raise_for_status = MagicMock()
+        async_client._raw_client.put = AsyncMock(side_effect=[preflight, upload_resp])
 
         await async_client.upload_bytes(
             "https://api.nukez.xyz/f/token", b"Hello!"
         )
 
-        _, kwargs = async_client._raw_client.put.call_args
-        assert kwargs["headers"]["Content-Type"] == "application/octet-stream"
+        # The real upload (second call) carries the Content-Type.
+        upload_call = async_client._raw_client.put.call_args_list[1]
+        assert upload_call.kwargs["headers"]["Content-Type"] == "application/octet-stream"
 
     async def test_upload_bytes_sends_content_type_when_specified(self, async_client):
         """upload_bytes sends Content-Type when caller provides it."""
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        async_client._raw_client.put = AsyncMock(return_value=mock_resp)
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {"Location": "https://storage.googleapis.com/signed-url"}
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.raise_for_status = MagicMock()
+        async_client._raw_client.put = AsyncMock(side_effect=[preflight, upload_resp])
 
         await async_client.upload_bytes(
             "https://api.nukez.xyz/f/token", b"Hello!", content_type="text/plain"
         )
 
-        _, kwargs = async_client._raw_client.put.call_args
-        assert kwargs["headers"]["Content-Type"] == "text/plain"
+        # Both calls carry the same Content-Type (needed for the signed
+        # URL's X-Goog-SignedHeaders validation on the real upload).
+        for call in async_client._raw_client.put.call_args_list:
+            assert call.kwargs["headers"]["Content-Type"] == "text/plain"
+
+    async def test_upload_bytes_preflights_short_url_and_uploads_to_resolved(
+        self, async_client
+    ):
+        """Async: gateway short URL → 307 resolve → body PUT to Location."""
+        resolved = "https://storage.googleapis.com/bucket/obj?X-Goog-Signature=abc"
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {"Location": resolved}
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.raise_for_status = MagicMock()
+        async_client._raw_client.put = AsyncMock(side_effect=[preflight, upload_resp])
+
+        payload = b"x" * (40 * 1024 * 1024)  # 40 MB
+        result = await async_client.upload_bytes(
+            "https://api.nukez.xyz/f/abcdef", payload, content_type="application/pdf"
+        )
+
+        # Preflight first
+        preflight_call = async_client._raw_client.put.call_args_list[0]
+        assert preflight_call.args[0] == "https://api.nukez.xyz/f/abcdef"
+        assert preflight_call.kwargs["content"] == b""
+        assert preflight_call.kwargs["follow_redirects"] is False
+
+        # Real upload second, to the resolved URL
+        upload_call = async_client._raw_client.put.call_args_list[1]
+        assert upload_call.args[0] == resolved
+        assert upload_call.kwargs["content"] == payload
+
+        # Result reports the original short URL
+        assert result.upload_url == "https://api.nukez.xyz/f/abcdef"
+        assert result.size_bytes == len(payload)
+
+    async def test_upload_bytes_raises_on_redirect_without_location(self, async_client):
+        """Async: gateway 307 with no Location header → NukezError."""
+        from pynukez.errors import NukezError
+
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {}  # no Location
+        async_client._raw_client.put = AsyncMock(return_value=preflight)
+
+        with pytest.raises(NukezError, match="no Location header"):
+            await async_client.upload_bytes("https://api.nukez.xyz/f/token", b"data")
+
+        assert async_client._raw_client.put.call_count == 1
 
     async def test_delete_file(self, async_client):
         async_client.http.delete = AsyncMock(return_value={

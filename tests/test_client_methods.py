@@ -367,44 +367,156 @@ class TestUploadBytesContentType:
         create_file defaults to application/octet-stream, so upload_bytes must too.
         """
         client = Nukez(keypair_path="~/.config/solana/id.json")
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
+        # Preflight: gateway 307s to resolved storage URL.
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {"Location": "https://storage.googleapis.com/signed-url"}
+        # Real upload: 200 OK.
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.raise_for_status = MagicMock()
         client._raw_client = MagicMock()
-        client._raw_client.put = MagicMock(return_value=mock_resp)
+        client._raw_client.put = MagicMock(side_effect=[preflight, upload_resp])
 
         client.upload_bytes("https://api.nukez.xyz/f/token", b"Hello!")
 
-        _, kwargs = client._raw_client.put.call_args
-        assert kwargs["headers"]["Content-Type"] == "application/octet-stream"
+        # The real upload (second call) carries the Content-Type header.
+        upload_call = client._raw_client.put.call_args_list[1]
+        assert upload_call.kwargs["headers"]["Content-Type"] == "application/octet-stream"
 
     @patch("pynukez.client.Keypair")
     def test_content_type_header_sent_when_specified(self, mock_kp):
         """upload_bytes sends Content-Type when caller provides it."""
         client = Nukez(keypair_path="~/.config/solana/id.json")
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {"Location": "https://storage.googleapis.com/signed-url"}
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.raise_for_status = MagicMock()
         client._raw_client = MagicMock()
-        client._raw_client.put = MagicMock(return_value=mock_resp)
+        client._raw_client.put = MagicMock(side_effect=[preflight, upload_resp])
 
         client.upload_bytes(
             "https://api.nukez.xyz/f/token", b"Hello!", content_type="text/plain"
         )
 
-        _, kwargs = client._raw_client.put.call_args
-        assert kwargs["headers"]["Content-Type"] == "text/plain"
+        # Both calls carry the same Content-Type: the preflight (for signed
+        # headers) and the real upload (for GCS to validate).
+        for call in client._raw_client.put.call_args_list:
+            assert call.kwargs["headers"]["Content-Type"] == "text/plain"
 
     @patch("pynukez.client.Keypair")
     def test_upload_bytes_uses_raw_client(self, mock_kp):
-        """upload_bytes uses self._raw_client (persistent, follow_redirects=True)."""
+        """upload_bytes uses self._raw_client for both preflight and body PUT."""
         client = Nukez(keypair_path="~/.config/solana/id.json")
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {"Location": "https://storage.googleapis.com/signed-url"}
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.raise_for_status = MagicMock()
         client._raw_client = MagicMock()
-        client._raw_client.put = MagicMock(return_value=mock_resp)
+        client._raw_client.put = MagicMock(side_effect=[preflight, upload_resp])
 
         client.upload_bytes("https://api.nukez.xyz/f/token", b"data")
 
-        client._raw_client.put.assert_called_once()
+        # Two PUTs: one bodyless preflight, one body PUT to resolved URL.
+        assert client._raw_client.put.call_count == 2
+
+    @patch("pynukez.client.Keypair")
+    def test_upload_bytes_preflights_short_url_and_uploads_to_resolved(self, mock_kp):
+        """upload_bytes resolves the 307 redirect and PUTs the body to the
+        gateway-provided Location, bypassing Cloud Run's 32 MB request limit.
+        """
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        resolved = "https://storage.googleapis.com/bucket/obj?X-Goog-Signature=abc"
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {"Location": resolved}
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.raise_for_status = MagicMock()
+        client._raw_client = MagicMock()
+        client._raw_client.put = MagicMock(side_effect=[preflight, upload_resp])
+
+        payload = b"x" * (40 * 1024 * 1024)  # 40 MB — above Cloud Run's limit
+        result = client.upload_bytes(
+            "https://api.nukez.xyz/f/abcdef", payload, content_type="application/pdf"
+        )
+
+        # Preflight: bodyless PUT to short URL, follow_redirects=False
+        preflight_call = client._raw_client.put.call_args_list[0]
+        assert preflight_call.args[0] == "https://api.nukez.xyz/f/abcdef"
+        assert preflight_call.kwargs["content"] == b""
+        assert preflight_call.kwargs["follow_redirects"] is False
+
+        # Real upload: body PUT to resolved GCS URL
+        upload_call = client._raw_client.put.call_args_list[1]
+        assert upload_call.args[0] == resolved
+        assert upload_call.kwargs["content"] == payload
+
+        # Result reports the original short URL, not the resolved GCS URL
+        assert result.upload_url == "https://api.nukez.xyz/f/abcdef"
+        assert result.size_bytes == len(payload)
+        assert result.content_type == "application/pdf"
+
+    @patch("pynukez.client.Keypair")
+    def test_upload_bytes_raises_on_redirect_without_location(self, mock_kp):
+        """Gateway 307 without Location header → NukezError, don't send body."""
+        from pynukez.errors import NukezError
+
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        preflight = MagicMock()
+        preflight.status_code = 307
+        preflight.headers = {}  # no Location
+        client._raw_client = MagicMock()
+        client._raw_client.put = MagicMock(return_value=preflight)
+
+        with pytest.raises(NukezError, match="no Location header"):
+            client.upload_bytes("https://api.nukez.xyz/f/token", b"data")
+
+        # Only the preflight was attempted — no body ever sent.
+        assert client._raw_client.put.call_count == 1
+
+    @patch("pynukez.client.Keypair")
+    def test_upload_bytes_skips_preflight_for_non_short_url(self, mock_kp):
+        """Non-gateway URLs (e.g. pre-resolved GCS URL) skip the preflight."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        upload_resp = MagicMock()
+        upload_resp.status_code = 200
+        upload_resp.raise_for_status = MagicMock()
+        client._raw_client = MagicMock()
+        client._raw_client.put = MagicMock(return_value=upload_resp)
+
+        client.upload_bytes(
+            "https://storage.googleapis.com/bucket/obj?X-Goog-Signature=abc",
+            b"data",
+        )
+
+        # Only one PUT — direct, no preflight.
+        assert client._raw_client.put.call_count == 1
+        call = client._raw_client.put.call_args_list[0]
+        assert call.args[0] == "https://storage.googleapis.com/bucket/obj?X-Goog-Signature=abc"
+        assert call.kwargs["content"] == b"data"
+        # follow_redirects was NOT overridden — no preflight kwarg on this call
+        assert "follow_redirects" not in call.kwargs
+
+    @patch("pynukez.client.Keypair")
+    def test_upload_bytes_surfaces_preflight_4xx_errors(self, mock_kp):
+        """Preflight 4xx (expired URL, bad token) surfaces via raise_for_status."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        preflight = MagicMock()
+        preflight.status_code = 410  # expired signed URL
+        preflight.raise_for_status = MagicMock(side_effect=RuntimeError("410 Gone"))
+        client._raw_client = MagicMock()
+        client._raw_client.put = MagicMock(return_value=preflight)
+
+        with pytest.raises(RuntimeError, match="410 Gone"):
+            client.upload_bytes("https://api.nukez.xyz/f/expired", b"data")
+
+        # Body never sent — failed during preflight.
+        assert client._raw_client.put.call_count == 1
 
 
 class TestDelegatingFlag:
