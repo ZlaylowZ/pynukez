@@ -308,14 +308,25 @@ All file operations require a `receipt_id` from the payment flow.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `provision_locker(receipt_id, tags=None, operator_pubkey=None)` | `NukezManifest` | Create storage namespace (one-time per receipt) |
-| `get_manifest(receipt_id)` | `dict` | Get locker manifest with all file metadata |
-| `list_files(receipt_id)` | `List[FileInfo]` | List all files with metadata (size, hash, timestamps) |
+| `get_files_manifest(receipt_id)` | `dict` | Raw files document (`locker_files_v1`): `files[]`, counts, timestamps. No ownership fields. |
+| `get_locker_record(receipt_id)` | `LockerRecord` | Locker identity document (`lockers_v1`): `owner_id`, `operator_ids`, receipt binding, provider. |
+| `list_files(receipt_id)` | `List[FileInfo]` | Typed file list (sugar over `get_files_manifest` + `FileInfo`) |
+
+`get_manifest()` is retained as a deprecated alias for `get_files_manifest()` and will be removed in the next major release.
+
+The gateway stores two independent documents per locker. `get_files_manifest()` is the hot-path read (changes on every upload); `get_locker_record()` is the cold-path read for ownership. Use `get_locker_record()` to verify the result of `add_operator()` / `remove_operator()` against the gateway's authoritative state.
 
 ```python
 manifest = client.provision_locker(receipt.id, tags=["myapp"])
+
+# Files
 files = client.list_files(receipt.id)
 for f in files:
     print(f.filename, f.size_bytes, f.content_hash)
+
+# Ownership
+record = client.get_locker_record(receipt.id)
+print(record.owner_id, record.operator_ids)
 ```
 
 ### File URL Management
@@ -512,6 +523,10 @@ urls = operator_client.create_file(receipt.id, "delegated.txt")
 
 # Owner revokes
 client.remove_operator(receipt.id, "operator_pubkey_base58")
+
+# Verify the mutation landed on the gateway's authoritative record
+record = client.get_locker_record(receipt.id)
+assert "operator_pubkey_base58" not in record.operator_ids
 ```
 
 ### Cross-Session Workflows: `bind_receipt`

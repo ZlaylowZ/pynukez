@@ -68,6 +68,9 @@ from .types import (
 
     # Operator delegation
     OperatorResult,
+
+    # Locker record (ownership / operator_ids)
+    LockerRecord,
 )
 
 # Error classes with agent-friendly messages
@@ -119,7 +122,7 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "3.5.0"
+__version__ = "3.6.1"
 
 __all__ = [
     # Main client

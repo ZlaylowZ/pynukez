@@ -34,7 +34,7 @@ from .errors import (
 
 # Standard headers shared by sync and async clients
 STANDARD_HEADERS = {
-    "User-Agent": "nukez-sdk/3.5.0",
+    "User-Agent": "nukez-sdk/3.6.1",
     "Accept": "application/json",
     "Content-Type": "application/json",
 }

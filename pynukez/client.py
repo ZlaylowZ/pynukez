@@ -49,6 +49,7 @@ from .types import (
     ViewerFileList,
     ViewerContainer,
     OperatorResult,
+    LockerRecord,
 )
 
 from .auth import (
@@ -2969,9 +2970,16 @@ class Nukez:
             deleted_at=response.get("deleted_at")
         )
     
-    def get_manifest(self, receipt_id: str) -> dict:
-        """Full locker state in one call — all files, hashes, metadata."""
-        signer = self._require_signer("get_manifest", receipt_id)
+    def get_files_manifest(self, receipt_id: str) -> dict:
+        """
+        Read the files manifest for a locker (schema: locker_files_v1).
+
+        Returns the hot-path document containing files[], timestamps, and
+        aggregate stats (file_count, total_bytes, hashed_file_count).
+        Does NOT contain ownership fields — use get_locker_record() for
+        owner_id / operator_ids.
+        """
+        signer = self._require_signer("get_files_manifest", receipt_id)
         locker_id = compute_locker_id(receipt_id)
 
         envelope = build_signed_envelope(
@@ -2986,6 +2994,56 @@ class Nukez:
         return self.http.get(
             f"/v1/lockers/{locker_id}/manifest",
             headers=envelope.headers,
+        )
+
+    def get_manifest(self, receipt_id: str) -> dict:
+        """Deprecated: use get_files_manifest() instead."""
+        import warnings
+        warnings.warn(
+            "get_manifest() is deprecated and will be removed in the next "
+            "major release. Use get_files_manifest() for the files document, "
+            "or get_locker_record() for ownership (owner_id, operator_ids).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_files_manifest(receipt_id)
+
+    def get_locker_record(self, receipt_id: str) -> LockerRecord:
+        """
+        Read the locker record (schema: lockers_v1).
+
+        Returns ownership and identity fields — owner_id, operator_ids,
+        receipt binding, provider. This is the cold-path document,
+        distinct from get_files_manifest().
+
+        Use this to verify the effect of add_operator() / remove_operator()
+        against the gateway's authoritative state.
+        """
+        signer = self._require_signer("get_locker_record", receipt_id)
+        locker_id = compute_locker_id(receipt_id)
+
+        envelope = build_signed_envelope(
+            signer=signer,
+            receipt_id=receipt_id,
+            method="GET",
+            path=f"/v1/lockers/{locker_id}/record",
+            ops=["locker:read"],
+            delegating=self._is_delegating(receipt_id),
+        )
+
+        response = self.http.get(
+            f"/v1/lockers/{locker_id}/record",
+            headers=envelope.headers,
+        )
+
+        return LockerRecord(
+            locker_id=response.get("locker_id", locker_id),
+            owner_id=response.get("owner_id", ""),
+            operator_ids=list(response.get("operator_ids", []) or []),
+            receipt_id=response.get("receipt_id", receipt_id),
+            provider=response.get("provider", ""),
+            created_at=response.get("created_at"),
+            tags=response.get("tags"),
         )
     
     # =========================================================================
@@ -3479,7 +3537,7 @@ class Nukez:
         t0 = time.time()
 
         # Step 1: Get manifest for file list and hashes
-        manifest = self.get_manifest(receipt_id)
+        manifest = self.get_files_manifest(receipt_id)
         manifest_files = manifest.get("files", [])
         hash_lookup = {
             f.get("filename", ""): f.get("content_hash", "")

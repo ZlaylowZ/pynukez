@@ -420,3 +420,25 @@ class OperatorResult:
     """Result from add_operator() / remove_operator()."""
     ok: bool
     operator_ids: List[str]  # current list of operator pubkeys
+
+
+@dataclass
+class LockerRecord:
+    """
+    Locker record from get_locker_record().
+
+    Maps to the gateway's `locker_index` document (schema: lockers_v1).
+    This is the cold-path ownership/identity record — distinct from
+    get_files_manifest(), which returns the hot-path files document
+    (schema: locker_files_v1).
+
+    Use this to read owner_id / operator_ids and to verify the result
+    of add_operator() / remove_operator() mutations.
+    """
+    locker_id: str
+    owner_id: str
+    operator_ids: List[str]
+    receipt_id: str
+    provider: str
+    created_at: Optional[str] = None
+    tags: Optional[List[str]] = None
