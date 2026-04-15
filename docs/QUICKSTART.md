@@ -5,7 +5,8 @@ You need two things:
 2. A keypair you use to sign envelopes on the locker owner side.
    - **Solana-paid lockers**: an Ed25519 keypair JSON (e.g. a file produced by
      `solana-keygen new`).
-   - **EVM-paid lockers**: an EVM private key JSON (`pip install pynukez[evm]`).
+   - **EVM-paid lockers**: an EVM private key JSON
+     (`{"address": "0x...", "private_key": "0x..."}`).
 
 pynukez does NOT move funds. You execute payments out-of-band (wallet,
 CLI, hardware signer, etc.) and hand us the resulting tx signature.
@@ -14,9 +15,9 @@ CLI, hardware signer, etc.) and hand us the resulting tx signature.
 
 ```bash
 pip install pynukez
-# Add EVM envelope signing if you will own EVM-paid lockers:
-pip install pynukez[evm]
 ```
+
+That's it. Envelope signing for both Solana-paid and EVM-paid lockers is in the base install.
 
 ## Step 2: Provide a keypair
 

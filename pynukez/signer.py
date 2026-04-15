@@ -60,10 +60,10 @@ class Signer(Protocol):
 class EVMSigner:
     """secp256k1 signer using EIP-191 personal_sign.
 
-    Loads from the same JSON format as EVM payment keys:
+    Loads from a JSON key file in the format:
         {"address": "0x...", "private_key": "0x...", ...}
 
-    Optional dependency: eth_account (gated behind pip install pynukez[evm]).
+    eth_account is a core pynukez dependency — no extras install required.
     """
 
     def __init__(self, private_key: str, address: str = ""):
@@ -76,17 +76,10 @@ class EVMSigner:
                      must match the address derived from private_key.
 
         Raises:
-            ImportError: If eth_account is not installed.
             ValueError: If provided address doesn't match derived address.
         """
-        try:
-            from eth_account import Account
-            from eth_account.messages import encode_defunct
-        except ImportError:
-            raise ImportError(
-                "eth_account required for EVM signing. "
-                "Install with: pip install pynukez[evm]"
-            )
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
         self._Account = Account
         self._encode_defunct = encode_defunct
 

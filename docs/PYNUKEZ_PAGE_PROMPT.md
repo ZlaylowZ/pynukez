@@ -42,9 +42,8 @@ A horizontal bar or card with install variants. Use a tab/toggle component:
 
 | Tab Label | Command |
 |-----------|---------|
-| Core (Solana envelopes) | `pip install pynukez` |
-| + EVM envelopes | `pip install pynukez[evm]` |
-| Everything | `pip install pynukez[all]` |
+| Install | `pip install pynukez` |
+| Dev tools | `pip install pynukez[dev]` |
 
 Each install command should be in a styled code block with a copy button.
 
@@ -437,7 +436,7 @@ These facts are verified against the source code (pynukez v3.2.0) and must be pr
 
 1. **Python >= 3.9** (not 3.11+)
 2. **Core deps**: `httpx`, `pynacl`, `base58` (NOT pydantic, NOT python-dotenv, NOT requests)
-3. **Install extras**: `[evm]`, `[dev]`, `[all]` — core already covers Ed25519 envelope signing for Solana-paid lockers
+3. **Install extras**: only `[dev]` exists. Envelope signing for both Solana-paid (Ed25519) and EVM-paid (secp256k1) lockers ships in the base install — no separate `[solana]` or `[evm]` target.
 4. **Two clients**: `Nukez` (sync) and `AsyncNukez` (async) with full parity
 5. **Errors**: `NukezFileNotFoundError` (NOT `LockerFileNotFoundError`)
 6. **Default workers**: 6 for `bulk_upload_paths` and `upload_files`

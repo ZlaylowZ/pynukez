@@ -117,7 +117,7 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "4.0.0"
+__version__ = "4.0.1"
 
 __all__ = [
     # Main client
@@ -213,8 +213,6 @@ def get_agent_instructions() -> dict:
 
         "installation": {
             "basic": "pip install pynukez",
-            "with_evm": "pip install pynukez[evm]",
-            "with_all": "pip install pynukez[all]",
             "development": "pip install pynukez[dev]"
         },
 
@@ -345,8 +343,7 @@ def get_agent_instructions() -> dict:
             "ed25519_keypair": "Required to sign envelopes for Solana-paid lockers",
             "evm_private_key": "Required to sign envelopes for EVM-paid lockers",
             "dependencies": {
-                "core": ["httpx", "pynacl", "base58"],
-                "evm_envelope_signing": ["eth-account"],
+                "core": ["httpx", "pynacl", "base58", "eth-account"],
             }
         }
     }

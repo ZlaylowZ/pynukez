@@ -23,11 +23,17 @@ TEST_EVM_ADDRESS = None  # computed in fixture
 
 @pytest.fixture
 def evm_signer():
-    """Create an EVMSigner from a test private key."""
+    """Create an EVMSigner from a test private key.
+
+    eth_account is a core pynukez dependency, so this should always succeed
+    on a correctly installed package. The try/except remains as a safety net
+    for broken environments where eth_account was somehow uninstalled
+    independently of pynukez.
+    """
     try:
         return EVMSigner(private_key=TEST_EVM_PRIVATE_KEY)
     except ImportError:
-        pytest.skip("eth_account not installed (pip install pynukez[evm])")
+        pytest.skip("eth_account not importable — try reinstalling pynukez")
 
 
 @pytest.fixture

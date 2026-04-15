@@ -35,24 +35,19 @@ Pay with SOL or MON. Store anything. Get a cryptographic receipt. Verify indepen
 ## Installation
 
 ```bash
-# Core SDK (Ed25519 envelope signing for Solana-paid lockers + file operations)
 pip install pynukez
-
-# + secp256k1 envelope signing for EVM-paid lockers
-pip install pynukez[evm]
-
-# Everything
-pip install pynukez[all]
 ```
+
+One command, one install target. Envelope signing for both Solana-paid (Ed25519) and EVM-paid (secp256k1) lockers is in the base install.
 
 Requires Python 3.9+. Supported on macOS, Linux, and Windows.
 
 ### Dependencies
 
-| Extra | Packages |
+| Group | Packages |
 |-------|----------|
-| **Core** | `httpx>=0.24.0`, `pynacl>=1.5.0`, `base58>=2.1.0` |
-| **evm** | `eth-account>=0.10.0` |
+| **Core (runtime)** | `httpx>=0.24.0`, `pynacl>=1.5.0`, `base58>=2.1.0`, `eth-account>=0.10.0` |
+| **[dev]** | `pytest`, `pytest-asyncio`, `pytest-mock`, `black`, `isort`, `mypy`, `python-dotenv` |
 | **dev** | `pytest`, `pytest-asyncio`, `pytest-mock`, `black`, `isort`, `mypy` |
 
 ---

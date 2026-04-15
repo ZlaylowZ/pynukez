@@ -5,10 +5,10 @@
 ```bash
 git clone https://github.com/ZlaylowZ/pynukez.git
 cd pynukez
-pip install -e ".[all]"
+pip install -e ".[dev]"
 ```
 
-The `[all]` extra pulls `[solana]`, `[evm]`, and `[dev]` tools (pytest, black, isort, mypy).
+The `[dev]` extra pulls testing and lint tooling (pytest, pytest-asyncio, pytest-mock, black, isort, mypy, python-dotenv). The runtime dependencies — httpx, pynacl, base58, eth-account — install with the base package.
 
 ## Tests
 

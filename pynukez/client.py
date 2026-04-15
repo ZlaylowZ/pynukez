@@ -519,35 +519,79 @@ class Nukez:
         pay_asset: str = None,
     ) -> StorageRequest:
         """
-        Step 1: Start the x402 payment flow to purchase storage.
+        Step 1: Start the x402 payment flow and receive payment instructions.
+
+        pynukez does NOT move funds. This call asks the gateway for a quote
+        and returns a StorageRequest describing where to pay, how much, and
+        on which chain. The caller then executes the transfer out-of-band
+        (wallet, CLI, hardware signer, another tool) and hands the resulting
+        tx signature to confirm_storage().
 
         Args:
-            units: Number of storage units to purchase
-            provider: Storage backend (default: server default, "gcs"). Options:
-                      "gcs"       — Google Cloud Storage, general-purpose.
-                      "mongodb"   — Document/RAG store (16 MB per-doc limit).
-                      "storj"     — Decentralized, S3-compatible storage.
-                      "arweave"   — Permanent, immutable storage.
-                      "filecoin"  — Content-addressed decentralized storage.
-                      "firestore" — Firebase document store.
-            pay_network: Payment chain. Default: Solana devnet.
-                         Examples: "solana-devnet", "monad-testnet", "monad-mainnet"
-            pay_asset: Token to pay with. Default: "SOL".
-                       Examples: "SOL", "USDC", "USDT", "MON", "WETH"
+            units: Number of storage units to purchase.
+            provider: Storage backend. Default: gateway's default (currently "gcs").
+                      Options:
+                        "gcs"       — Google Cloud Storage, general-purpose.
+                        "mongodb"   — Document/RAG store (16 MB per-doc limit).
+                        "storj"     — Decentralized, S3-compatible storage.
+                        "arweave"   — Permanent, immutable storage.
+                        "filecoin"  — Content-addressed decentralized storage.
+                        "firestore" — Firebase document store.
+            pay_network: Payment chain identifier. Default: gateway picks a
+                      chain based on the configured signer (Solana if only
+                      a Solana keypair is provided; Monad if only an EVM
+                      key is provided).
+
+                      The SDK accepts EITHER the CAIP-2 identifier that the
+                      gateway returns in the 402 response (preferred — matches
+                      request.payment_options[].network entries 1:1) OR the
+                      SDK's friendly alias. Both are forwarded to the gateway
+                      verbatim and converted to CAIP-2 where needed for x402
+                      headers.
+
+                      CAIP-2                                              Friendly
+                      -------------------------------------------------   ---------------
+                      solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp             solana-mainnet
+                      solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1             solana-devnet
+                      solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z             solana-testnet
+                      eip155:143                                          monad-mainnet
+                      eip155:10143                                        monad-testnet
+            pay_asset: Token symbol matching one of
+                      `request.payment_options[].pay_asset`. Default: the
+                      gateway picks ("SOL" for Solana, "MON" for Monad).
+
+                      Asset availability is chain-dependent — the gateway's
+                      402 response enumerates what's actually offered on
+                      your selected chain in `payment_options`. Consult it
+                      after your first call rather than guessing.
+
+                      Symbols currently returned by the gateway:
+                        Solana:          SOL, USDC, USDT
+                        Monad (EVM):     MON, USDC, USDT0, WETH
+
+                      Note: Monad returns `USDT0` (Tether USD₀), not `USDT`.
 
         Returns:
             StorageRequest with payment instructions:
             - pay_req_id: Save this for confirm_storage()
             - pay_to_address: Address to send payment (Solana pubkey or 0x address)
-            - amount_sol / amount_lamports: Populated for Solana payments
-            - amount / amount_raw / token_address: Populated for EVM payments
-            - pay_asset: Token symbol ("SOL", "USDC", etc.)
-            - network: Payment network identifier
-            - next_step: Instructions for what to do next
+            - amount_sol / amount_lamports: Populated for Solana quotes
+            - amount / amount_raw / token_address / token_decimals:
+              Populated for EVM quotes
+            - pay_asset: Token symbol ("SOL", "USDC", "MON", "USDT0", etc.)
+            - network: Payment network identifier (friendly form, converted
+              from the 402 response's CAIP-2 string via caip2_to_friendly)
+            - payment_options: Full list of chain/asset combinations the
+              gateway offers for this quote (each entry's `network` field
+              is CAIP-2)
+            - next_step: Human-readable guidance for the agent, including
+              the exact confirm_storage(...) call to make after the transfer
+              lands
 
         Note:
-            This endpoint returns HTTP 402 Payment Required - this is expected behavior,
-            not an error. The response contains the payment instructions.
+            The gateway returns HTTP 402 Payment Required — this is expected
+            behavior for the x402 protocol, not an error. The SDK catches
+            the 402 and converts it to the StorageRequest return value.
         """
         # Auto-detect EVM defaults when client has an EVM key configured.
         # Infer mainnet vs testnet from client.network — don't hardcode testnet.
@@ -647,16 +691,35 @@ class Nukez:
         matching the working nukez implementation.
 
         Args:
-            pay_req_id: Payment request ID from request_storage()
+            pay_req_id: Payment request ID from request_storage().
             tx_sig: On-chain transaction signature for the payment.
                 You execute the transfer externally (wallet, CLI, etc.) and
                 hand us the signature — pynukez does not move funds.
-            max_retries: Maximum retry attempts for tx_not_found (default: 5)
-            initial_delay: Initial delay in seconds, doubles each retry (default: 2.0)
-            payment_chain: Payment chain override (e.g. "monad-testnet") — Phase 1
-            payment_asset: Payment asset override (e.g. "MON") — Phase 1
-            operator_pubkey: Ed25519 base58 pubkey to bind as operator at confirm time.
-                If omitted, auto-inferred for EVM payments (0x-prefixed tx_sig).
+            max_retries: Maximum retry attempts for tx_not_found / retryable
+                402 responses (default: 5).
+            initial_delay: Initial delay in seconds, doubles each retry (default: 2.0).
+            payment_chain: Chain identifier for this payment. Required for
+                EVM payments (ignored for Solana). Accepts either the CAIP-2
+                form the gateway returns in its 402 response (preferred —
+                matches request.payment_options[].network entries 1:1) or
+                the SDK's friendly alias. The SDK converts friendly → CAIP-2
+                for the X-Payment-Chain header at send time.
+
+                CAIP-2                                              Friendly
+                -------------------------------------------------   ---------------
+                solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp             solana-mainnet
+                solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1             solana-devnet
+                eip155:143                                          monad-mainnet
+                eip155:10143                                        monad-testnet
+            payment_asset: Token symbol this payment settled in. Required
+                for EVM payments (ignored for Solana). Must match one of
+                request.payment_options[].pay_asset — e.g. "MON", "USDC",
+                "USDT0", "WETH" on Monad.
+            operator_pubkey: Ed25519 base58 pubkey to bind as operator at
+                confirm time. If omitted and the tx_sig is EVM-shaped
+                (0x-prefixed), the SDK auto-binds the current Ed25519
+                keypair — this behavior is deprecated and will be removed
+                in pynukez 5.0.
 
         Returns:
             Receipt with:

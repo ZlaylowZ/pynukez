@@ -7,9 +7,10 @@
 [![License](https://img.shields.io/pypi/l/pynukez.svg)](https://github.com/ZlaylowZ/pynukez/blob/main/LICENSE)
 
 ```bash
-pip install pynukez         # Core SDK (Solana Ed25519 envelope signing)
-pip install pynukez[evm]    # + secp256k1 envelope signing for EVM-paid lockers
+pip install pynukez
 ```
+
+One command, one install target. Envelope signing works for both Solana-paid (Ed25519) and EVM-paid (secp256k1) lockers out of the box — no extras knob to get wrong.
 
 Requires Python 3.9+.
 
