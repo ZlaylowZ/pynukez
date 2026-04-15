@@ -1,49 +1,46 @@
 # Quick Start
 
-You need three things:
-1. Python
-2. A Solana wallet
-3. Some SOL (free on devnet)
+You need two things:
+1. Python 3.9+
+2. A keypair you use to sign envelopes on the locker owner side.
+   - **Solana-paid lockers**: an Ed25519 keypair JSON (e.g. a file produced by
+     `solana-keygen new`).
+   - **EVM-paid lockers**: an EVM private key JSON (`pip install pynukez[evm]`).
+
+pynukez does NOT move funds. You execute payments out-of-band (wallet,
+CLI, hardware signer, etc.) and hand us the resulting tx signature.
 
 ## Step 1: Install
 
 ```bash
-pip install pynukez[solana]
+pip install pynukez
+# Add EVM envelope signing if you will own EVM-paid lockers:
+pip install pynukez[evm]
 ```
 
-## Step 2: Create a Wallet
+## Step 2: Provide a keypair
 
-If you don't have a Solana wallet:
+Any Ed25519 keypair in the Solana JSON format works. If you don't have one:
 
 ```bash
-# Install Solana tools
+# Optional — only if you want to use solana-keygen to produce a key file
 sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
-
-# Create wallet (writes to ~/.config/solana/id.json)
 solana-keygen new
 ```
 
-## Step 3: Get Free SOL
+The resulting file at `~/.config/solana/id.json` is what `keypair_path`
+expects.
 
-```bash
-solana config set --url devnet
-solana airdrop 2
-```
-
-## Step 4: Test It
+## Step 3: Test It
 
 ```python
 from pynukez import Nukez
 
 client = Nukez(keypair_path="~/.config/solana/id.json")
 
-# Check balance
-wallet = client.get_wallet_info()
-print(f"Balance: {wallet.balance_sol} SOL")
-
-# Check price
+# Check price (no payment or on-chain activity)
 price = client.get_price()
 print(f"Storage costs: {price.amount_sol} SOL")
 ```
 
-If that works, you're ready. Go read the [README](./README.md).
+If that works, you're ready. Go read the [README](../README.md).

@@ -27,12 +27,17 @@ def run_tool(name, args):
     
     if name == "nukez_request_storage":
         r = storage.request_storage(args.get("units", 1))
-        return {"pay_req_id": r.pay_req_id, "pay_to_address": r.pay_to_address, "amount_sol": r.amount_sol}
-    
-    elif name == "nukez_solana_transfer":
-        r = storage.solana_transfer(args["to_address"], args["amount_sol"])
-        return {"signature": r.signature}
-    
+        return {
+            "pay_req_id": r.pay_req_id,
+            "pay_to_address": r.pay_to_address,
+            "amount_sol": r.amount_sol,
+            "amount": r.amount,
+            "pay_asset": r.pay_asset,
+            "network": r.network,
+            "next_step": r.next_step,
+            "note": "pynukez does not move funds. Execute the transfer externally and pass the tx signature to nukez_confirm_storage.",
+        }
+
     elif name == "nukez_confirm_storage":
         r = storage.confirm_storage(args["pay_req_id"], args["tx_sig"])
         receipt_id = r.id

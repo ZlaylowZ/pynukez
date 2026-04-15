@@ -42,9 +42,8 @@ A horizontal bar or card with install variants. Use a tab/toggle component:
 
 | Tab Label | Command |
 |-----------|---------|
-| Solana | `pip install pynukez[solana]` |
-| EVM/Monad | `pip install pynukez[evm]` |
-| Core Only | `pip install pynukez` |
+| Core (Solana envelopes) | `pip install pynukez` |
+| + EVM envelopes | `pip install pynukez[evm]` |
 | Everything | `pip install pynukez[all]` |
 
 Each install command should be in a styled code block with a copy button.
@@ -65,14 +64,16 @@ client = Nukez(keypair_path="~/.config/solana/id.json")
 # 1. Check pricing
 price = client.get_price()
 
-# 2. Request storage (returns payment instructions)
+# 2. Request storage (returns payment instructions —
+#    pynukez does NOT move funds)
 request = client.request_storage(units=1)
 
-# 3. Execute Solana payment
-transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
+# 3. Execute the transfer externally (wallet, CLI, another tool).
+#    Capture the resulting transaction signature.
+tx_sig = "..."  # from your wallet / RPC / CLI
 
 # 4. Confirm payment and get receipt
-receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
+receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
 # SAVE receipt.id - you need it for everything!
 
 # 5. Provision a locker (one-time per receipt)
@@ -98,7 +99,7 @@ Below the code block, a callout:
 A horizontal pipeline/flowchart component with 4 stages. Use the neon cyan accent for connectors/arrows.
 
 ```
-[Request Storage] --> [Pay On-Chain] --> [Confirm & Receipt] --> [Store / Verify]
+[Request Storage] --> [Pay Externally] --> [Confirm & Receipt] --> [Store / Verify]
 ```
 
 **Stage 1: Request**
@@ -106,13 +107,13 @@ A horizontal pipeline/flowchart component with 4 stages. Use the neon cyan accen
 - Gateway returns payment instructions via x402 protocol
 - Multi-chain: choose SOL, MON, USDC, USDT, or WETH
 
-**Stage 2: Pay**
-- Solana: `client.solana_transfer(address, amount)`
-- EVM/Monad: `client.evm_transfer(address, amount_raw, ...)`
-- Payment executes on-chain -- fully verifiable
+**Stage 2: Pay (externally)**
+- pynukez does NOT execute on-chain transfers
+- Use your wallet, CLI, or any other signer to send the amount
+- Capture the resulting tx signature for the next step
 
 **Stage 3: Confirm**
-- `client.confirm_storage(pay_req_id, tx_signature)`
+- `client.confirm_storage(pay_req_id, tx_sig=<your_tx_signature>)`
 - Gateway verifies on-chain, returns cryptographic receipt
 - Receipt ID is the root credential for all operations
 
@@ -143,8 +144,8 @@ A 2x3 or 3x2 grid of feature cards. Each card has an icon, title, and 1-2 line d
 **Card 1: Agent-Native Design**
 Every method is a self-contained tool. Explicit parameters, predictable dataclass returns, no hidden state. Built for LLM tool-calling patterns.
 
-**Card 2: Multi-Chain Payments**
-Pay with SOL on Solana or MON/WETH on Monad. Single SDK, dual-key support. Ed25519 + secp256k1 signing.
+**Card 2: Multi-Chain, SDK-Out-Of-Band**
+Pay with SOL on Solana or MON/WETH on Monad. pynukez does NOT move funds — it tells you what to pay, you sign externally, it confirms. Ed25519 + secp256k1 envelope signing.
 
 **Card 3: Cryptographic Verification**
 SHA-256 content hashes, merkle tree attestation, on-chain anchoring via Switchboard. Independently verifiable without trusting anyone.
@@ -167,9 +168,8 @@ A compact, scannable table showing the most common operations. Use a monospace c
 | What you want | Code |
 |---------------|------|
 | Buy storage | `request = client.request_storage()` |
-| Pay (Solana) | `transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)` |
-| Pay (EVM) | `transfer = client.evm_transfer(request.pay_to_address, request.amount_raw, ...)` |
-| Get receipt | `receipt = client.confirm_storage(request.pay_req_id, transfer.signature)` |
+| Pay | Execute the transfer externally (wallet, CLI, another tool) — pynukez does not move funds |
+| Get receipt | `receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_sig>)` |
 | Setup locker | `client.provision_locker(receipt.id)` |
 | Store bytes | `urls = client.create_file(receipt.id, "f.txt")` then `client.upload_bytes(urls.upload_url, data)` |
 | Store file | `client.upload_file_path(receipt.id, "/path/to/file.pdf")` |
@@ -236,7 +236,6 @@ A styled table showing errors, whether they're retryable, and how to recover:
 | `RateLimitError` | Yes | Wait `e.retry_after` seconds |
 | `NukezFileNotFoundError` | No | Check `list_files()` -- file may not exist yet |
 | `NukezNotProvisionedError` | No | Call `provision_locker()` first |
-| `InsufficientFundsError` | No | Fund wallet (`solana airdrop 2` on devnet) |
 | `AuthenticationError` | No | Check keypair matches payer. Envelope TTL is 5 min. |
 
 Code example showing the retry pattern:
@@ -386,12 +385,11 @@ Constructor parameter table:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `keypair_path` | -- | Path to Solana keypair JSON |
+| `keypair_path` | -- | Ed25519 keypair JSON for Solana-paid lockers |
 | `base_url` | `https://api.nukez.xyz` | Gateway API URL |
 | `network` | `"devnet"` | `"devnet"` or `"mainnet-beta"` |
-| `rpc_url` | `https://api.devnet.solana.com` | Solana RPC endpoint |
-| `evm_private_key_path` | -- | Path to EVM private key |
-| `evm_rpc_url` | -- | EVM RPC endpoint |
+| `evm_private_key_path` | -- | EVM private key for secp256k1 envelope signing |
+| `evm_rpc_url` | -- | Reserved; currently unused at the SDK layer |
 | `signing_key` | -- | Explicit `Signer` instance |
 
 ---
@@ -417,7 +415,7 @@ A compact FAQ/accordion component:
 | Problem | Fix |
 |---------|-----|
 | "Transaction not found" | Wait 3 seconds, retry `confirm_storage()` (auto-retries 5x) |
-| "Insufficient funds" | `solana airdrop 2` (devnet) or fund wallet (mainnet) |
+| Transfer tooling (external) | Use your wallet, CLI, or preferred signer — pynukez does not move funds |
 | "URL expired" | `client.get_file_urls(receipt_id, filename)` for fresh URLs |
 | "File not found" | Check `client.list_files(receipt_id)` |
 | "Locker not provisioned" | Call `client.provision_locker(receipt_id)` first |
@@ -428,7 +426,7 @@ A compact FAQ/accordion component:
 ### 18. Footer CTA
 
 **Headline**: "Start building in 30 seconds"
-**Command**: `pip install pynukez[solana]` (with copy button)
+**Command**: `pip install pynukez` (with copy button)
 **Links row**: [GitHub](https://github.com/ZlaylowZ/pynukez) | [Full API Reference](docs/SDK_REFERENCE.md) | [Examples](https://github.com/ZlaylowZ/pynukez/tree/main/examples) | [PyPI](https://pypi.org/project/pynukez/)
 
 ---
@@ -439,7 +437,7 @@ These facts are verified against the source code (pynukez v3.2.0) and must be pr
 
 1. **Python >= 3.9** (not 3.11+)
 2. **Core deps**: `httpx`, `pynacl`, `base58` (NOT pydantic, NOT python-dotenv, NOT requests)
-3. **Install extras**: `[solana]`, `[evm]`, `[dev]`, `[all]`
+3. **Install extras**: `[evm]`, `[dev]`, `[all]` — core already covers Ed25519 envelope signing for Solana-paid lockers
 4. **Two clients**: `Nukez` (sync) and `AsyncNukez` (async) with full parity
 5. **Errors**: `NukezFileNotFoundError` (NOT `LockerFileNotFoundError`)
 6. **Default workers**: 6 for `bulk_upload_paths` and `upload_files`
@@ -464,7 +462,7 @@ These facts are verified against the source code (pynukez v3.2.0) and must be pr
 - **Scannable tables**: Use tables for the API reference, error handling, and constructor params. Developers skim, they don't read paragraphs.
 - **Copy buttons**: Every code block needs a copy-to-clipboard button.
 - **Syntax highlighting**: Python syntax highlighting with the JetBrains Mono font. Use the neon cyan accent for keywords or method names if possible.
-- **Don't bury the install command**: `pip install pynukez[solana]` should be visible within 2 seconds of page load.
+- **Don't bury the install command**: `pip install pynukez` should be visible within 2 seconds of page load.
 - **Mobile responsive**: Tables should scroll horizontally on mobile rather than wrapping.
 - **Dark theme**: Match the existing site's dark aesthetic. Code blocks should use a dark syntax theme.
 - **Navigation**: Consider a sticky sidebar TOC for the reference sections (like modern docs sites) -- the page has 17+ sections.

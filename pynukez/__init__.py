@@ -1,27 +1,32 @@
 """
 Nukez - Agent-native Python SDK for Nukez storage.
 
-Autonomous AI storage with cryptographic verification on Solana.
+Autonomous AI storage with cryptographic verification.
 
-This SDK is designed for autonomous AI agents that need persistent storage with
-cryptographic receipts. Every function is tool-shaped and stateless - perfect
-for LLM tool-calling patterns.
+This SDK is designed for autonomous AI agents that need persistent storage
+with cryptographic receipts. Every function is tool-shaped and stateless —
+perfect for LLM tool-calling patterns.
+
+pynukez does NOT move funds. request_storage() returns payment instructions
+(address, amount, chain, asset). You execute the transfer out-of-band
+(wallet, CLI, another tool) and hand the resulting transaction signature
+to confirm_storage() to close the payment loop.
 
 Quick Start (sync):
     from pynukez import Nukez
 
     client = Nukez(keypair_path=KEYPAIR_PATH)
     request = client.request_storage(units=1)
-    transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
-    receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
+    # ... user executes the transfer externally ...
+    receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)
 
 Quick Start (async):
     from pynukez import AsyncNukez
 
     async with AsyncNukez(keypair_path=KEYPAIR_PATH) as client:
         request = await client.request_storage(units=1)
-        transfer = await client.solana_transfer(request.pay_to_address, request.amount_sol)
-        receipt = await client.confirm_storage(request.pay_req_id, transfer.signature)
+        # ... user executes the transfer externally ...
+        receipt = await client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)
 """
 
 # Client classes
@@ -35,7 +40,6 @@ from .signer import Signer, EVMSigner
 from .types import (
     # Payment flow types
     StorageRequest,
-    TransferResult,
     Receipt,
     PaymentOption,
 
@@ -52,7 +56,6 @@ from .types import (
 
     # Utility types
     VerificationResult,
-    WalletInfo,
     PriceInfo,
     DiscoveryDoc,
 
@@ -77,13 +80,12 @@ from .types import (
 from .errors import (
     NukezError,                   # Base exception
     PaymentRequiredError,         # HTTP 402 - contains payment instructions
-    TransactionNotFoundError,     # Solana tx not yet confirmed (retryable)
+    TransactionNotFoundError,     # tx not yet confirmed (retryable)
     AuthenticationError,          # Signature verification failed
     NukezFileNotFoundError,       # File doesn't exist
     FileNotFound,                 # Alias for NukezFileNotFoundError
     URLExpiredError,              # Signed URL has expired (retryable)
     NukezNotProvisionedError,     # Locker needs provisioning
-    InsufficientFundsError,       # Wallet balance too low
     RateLimitError,               # API rate limit hit
     # Operator delegation errors
     OperatorError,                # Base for all operator errors
@@ -95,13 +97,6 @@ from .errors import (
     OperatorConflictError,        # 409 duplicate or max reached
     ReceiptStateNotBoundError,    # bind_receipt required before op
 )
-
-# EVM payment support (optional — requires pip install pynukez[evm])
-try:
-    from .evm_payment import EVMPayment, HAS_WEB3
-except ImportError:
-    EVMPayment = None
-    HAS_WEB3 = False
 
 # Authentication utilities
 from .auth import (
@@ -122,34 +117,31 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "3.6.1"
+__version__ = "4.0.0"
 
 __all__ = [
     # Main client
     "Nukez",
-    
+
     # Data types - Payment Flow
     "StorageRequest",
-    "TransferResult",
     "Receipt",
     "PaymentOption",
-    "EVMPayment",
-    
+
     # Data types - File Operations
     "SignedEnvelope",
     "NukezManifest",
     "FileUrls",
-    "FileInfo", 
+    "FileInfo",
     "ViewerLink",
     "FileViewerInfo",
     "ViewerFileList",
     "ViewerContainer",
     "UploadResult",
     "DeleteResult",
-    
+
     # Data types - Utilities
     "VerificationResult",
-    "WalletInfo",
     "PriceInfo",
     "DiscoveryDoc",
 
@@ -166,7 +158,6 @@ __all__ = [
     "FileNotFound",
     "URLExpiredError",
     "NukezNotProvisionedError",
-    "InsufficientFundsError",
     "RateLimitError",
     "ReceiptStateNotBoundError",
 
@@ -218,11 +209,10 @@ def get_agent_instructions() -> dict:
     return {
         "package": "pynukez",
         "version": __version__,
-        "description": "Agent-native storage with cryptographic verification on Solana",
-        
+        "description": "Agent-native storage with cryptographic verification",
+
         "installation": {
             "basic": "pip install pynukez",
-            "with_solana": "pip install pynukez[solana]",
             "with_evm": "pip install pynukez[evm]",
             "with_all": "pip install pynukez[all]",
             "development": "pip install pynukez[dev]"
@@ -231,8 +221,10 @@ def get_agent_instructions() -> dict:
         "quickstart_flow": [
             "1. client = Nukez(keypair_path='~/.config/solana/id.json')",
             "2. request = client.request_storage(units=1)",
-            "3. transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)",
-            "4. receipt = client.confirm_storage(request.pay_req_id, transfer.signature)",
+            "3. # Execute the transfer yourself — pynukez does NOT move funds.",
+            "   # Use your wallet, CLI, or another tool to send request.amount",
+            "   # request.pay_asset to request.pay_to_address on request.network.",
+            "4. receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)",
             "5. manifest = client.provision_locker(receipt.id)",
             "6. urls = client.create_file(receipt.id, 'data.txt')",
             "7. client.upload_bytes(urls.upload_url, b'Hello!')",
@@ -241,19 +233,18 @@ def get_agent_instructions() -> dict:
 
         "payment_flow": {
             "description": (
-                "After request_storage(), check the response to determine the payment chain. "
-                "The response includes payment_options listing ALL available chain/asset combinations."
-            ),
-            "solana": (
-                "If request.is_evm is False: call solana_transfer(request.pay_to_address, request.amount_sol)"
-            ),
-            "evm": (
-                "If request.is_evm is True: call evm_transfer(request.pay_to_address, request.amount_raw, "
-                "pay_asset=request.pay_asset, token_address=request.token_address, network=request.network)"
+                "pynukez does not execute crypto transfers. request_storage() returns "
+                "payment instructions (address, amount, asset, chain). You execute the "
+                "transfer externally — wallet, CLI, another tool — and hand the "
+                "resulting transaction signature to confirm_storage() to close the loop. "
+                "The response includes payment_options listing ALL available "
+                "chain/asset combinations."
             ),
             "confirm": (
-                "Then call confirm_storage(request.pay_req_id, transfer.tx_hash). "
-                "For EVM payments, also pass payment_chain=request.network, payment_asset=request.pay_asset."
+                "After you obtain a tx signature, call "
+                "confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>). "
+                "For EVM payments, also pass payment_chain=request.network, "
+                "payment_asset=request.pay_asset."
             ),
         },
 
@@ -282,10 +273,8 @@ def get_agent_instructions() -> dict:
                 "health_check": "Verify API availability"
             },
             "payment": {
-                "request_storage": "Start x402 payment flow - returns payment instructions with payment_options",
-                "solana_transfer": "Execute SOL payment (Solana chain)",
-                "evm_transfer": "Execute EVM payment — MON/USDC/USDT/WETH (Monad, Ethereum, etc.)",
-                "confirm_storage": "Confirm payment and get receipt (SAVE receipt.id!)",
+                "request_storage": "Start x402 payment flow — returns payment instructions with payment_options. pynukez does NOT move funds; you execute the transfer externally.",
+                "confirm_storage": "Confirm payment and get receipt (SAVE receipt.id!). Takes the tx_sig from the transfer you executed out-of-band.",
                 "get_provider_info": "Check provider capabilities and limits before selecting",
             },
             "storage": {
@@ -327,25 +316,25 @@ def get_agent_instructions() -> dict:
                 "compute_hash": "Calculate SHA256 for local verification"
             },
             "utilities": {
-                "compute_locker_id": "Derive locker ID from receipt ID", 
+                "compute_locker_id": "Derive locker ID from receipt ID",
                 "build_signed_envelope": "Create authentication headers",
-                "get_wallet_info": "Get wallet balance and address"
             }
         },
-        
+
         "error_handling": {
             "PaymentRequiredError": "Expected from request_storage() - contains payment instructions",
-            "TransactionNotFoundError": "Solana tx not visible yet - wait and retry confirm_storage()",
+            "TransactionNotFoundError": "tx not visible yet - wait and retry confirm_storage()",
             "AuthenticationError": "Check keypair and that envelope hasn't expired (5 min TTL)",
             "NukezFileNotFoundError": "Use create_file() first or check list_files()",
             "URLExpiredError": "Call get_file_urls() to get fresh URLs (30 min default TTL)"
         },
-        
+
         "authentication_modes": [
-            "signed_envelope: Ed25519 signatures for API requests (automatic)",
-            "All signed operations require keypair_path in Nukez()"
+            "signed_envelope: Ed25519 or secp256k1 signatures for API requests (automatic)",
+            "Solana-paid lockers: keypair_path (Ed25519)",
+            "EVM-paid lockers: evm_private_key_path (secp256k1)",
         ],
-        
+
         "networks": {
             "solana": ["solana-devnet", "solana-mainnet-beta"],
             "evm": ["monad-testnet", "monad-mainnet"],
@@ -353,12 +342,11 @@ def get_agent_instructions() -> dict:
 
         "requirements": {
             "python": ">=3.9",
-            "solana_keypair": "Required for Solana payments and signed requests",
-            "evm_private_key": "Required for EVM payments (hex string or raw 32 bytes)",
+            "ed25519_keypair": "Required to sign envelopes for Solana-paid lockers",
+            "evm_private_key": "Required to sign envelopes for EVM-paid lockers",
             "dependencies": {
-                "core": ["requests", "pynacl", "base58"],
-                "solana_payments": ["solana", "solders"],
-                "evm_payments": ["web3", "eth-account"],
+                "core": ["httpx", "pynacl", "base58"],
+                "evm_envelope_signing": ["eth-account"],
             }
         }
     }
@@ -420,60 +408,6 @@ def get_tool_definitions() -> list:
             }
         },
         {
-            "type": "function", 
-            "function": {
-                "name": "nukez_solana_transfer",
-                "description": "Execute Solana SOL transfer to pay for storage. Use pay_to_address and amount_sol from request_storage() result.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "to_address": {
-                            "type": "string",
-                            "description": "Destination Solana address (from request_storage().pay_to_address)"
-                        },
-                        "amount_sol": {
-                            "type": "number",
-                            "description": "Amount in SOL to transfer (from request_storage().amount_sol)"
-                        }
-                    },
-                    "required": ["to_address", "amount_sol"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "nukez_evm_transfer",
-                "description": "Execute EVM token transfer for storage payment (Monad, Ethereum, etc.). Use when request_storage() returns an EVM network (is_evm=True). Requires pynukez[evm].",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "to_address": {
-                            "type": "string",
-                            "description": "Destination 0x address (from request_storage().pay_to_address)"
-                        },
-                        "amount_raw": {
-                            "type": "integer",
-                            "description": "Atomic units (from request_storage().amount_raw)"
-                        },
-                        "pay_asset": {
-                            "type": "string",
-                            "description": "Token symbol (from request_storage().pay_asset). e.g. MON, USDC, USDT, WETH"
-                        },
-                        "token_address": {
-                            "type": "string",
-                            "description": "ERC-20 contract address (from request_storage().token_address). Omit for native tokens."
-                        },
-                        "network": {
-                            "type": "string",
-                            "description": "EVM network (from request_storage().network). e.g. monad-testnet, monad-mainnet"
-                        }
-                    },
-                    "required": ["to_address", "amount_raw"]
-                }
-            }
-        },
-        {
             "type": "function",
             "function": {
                 "name": "nukez_get_provider_info",
@@ -504,8 +438,8 @@ def get_tool_definitions() -> list:
                             "description": "Payment request ID from request_storage()"
                         },
                         "tx_sig": {
-                            "type": "string", 
-                            "description": "Transaction signature from solana_transfer()"
+                            "type": "string",
+                            "description": "On-chain transaction signature for the payment you executed externally (pynukez does not move funds)"
                         }
                     },
                     "required": ["pay_req_id", "tx_sig"]
@@ -1286,18 +1220,6 @@ def get_tool_definitions() -> list:
                         }
                     },
                     "required": ["receipt_id", "filename"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "nukez_get_wallet_info",
-                "description": "Get wallet information for the current keypair. Returns pubkey, balance in SOL, and network.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
                 }
             }
         },

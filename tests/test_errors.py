@@ -13,7 +13,6 @@ from pynukez.errors import (
     NukezFileNotFoundError,
     URLExpiredError,
     NukezNotProvisionedError,
-    InsufficientFundsError,
     RateLimitError,
 )
 
@@ -70,10 +69,6 @@ class TestNonRetryableErrors:
         err = NukezFileNotFoundError("test.txt", "locker_abc")
         assert err.retryable is False
         assert err.filename == "test.txt"
-
-    def test_insufficient_funds_not_retryable(self):
-        err = InsufficientFundsError(required=1.0, available=0.5)
-        assert err.retryable is False
 
 
 class TestBackwardCompatAlias:

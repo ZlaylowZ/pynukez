@@ -35,13 +35,10 @@ Pay with SOL or MON. Store anything. Get a cryptographic receipt. Verify indepen
 ## Installation
 
 ```bash
-# Core SDK (signing + file operations)
+# Core SDK (Ed25519 envelope signing for Solana-paid lockers + file operations)
 pip install pynukez
 
-# With Solana payment support
-pip install pynukez[solana]
-
-# With EVM/Monad payment support
+# + secp256k1 envelope signing for EVM-paid lockers
 pip install pynukez[evm]
 
 # Everything
@@ -55,8 +52,7 @@ Requires Python 3.9+. Supported on macOS, Linux, and Windows.
 | Extra | Packages |
 |-------|----------|
 | **Core** | `httpx>=0.24.0`, `pynacl>=1.5.0`, `base58>=2.1.0` |
-| **solana** | `solana>=0.30.0`, `solders>=0.18.0` |
-| **evm** | `web3>=6.0.0`, `eth-account>=0.10.0` |
+| **evm** | `eth-account>=0.10.0` |
 | **dev** | `pytest`, `pytest-asyncio`, `pytest-mock`, `black`, `isort`, `mypy` |
 
 ---
@@ -73,12 +69,16 @@ price = client.get_price()
 
 # 2. Request storage (returns payment instructions)
 request = client.request_storage(units=1)
+print(request.next_step)
+# -> "Transfer 0.001 SOL to <addr> on solana-devnet, then call
+#     confirm_storage(pay_req_id='...', tx_sig=<your_tx_signature>)"
 
-# 3. Execute Solana payment
-transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
+# 3. Execute the transfer externally (wallet, CLI, another tool).
+#    pynukez does NOT move funds — it only tells you what to pay.
+tx_sig = "..."  # from your wallet / RPC / CLI
 
 # 4. Confirm payment and get receipt
-receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
+receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
 # SAVE receipt.id - you need it for everything!
 
 # 5. Provision a locker (one-time per receipt)
@@ -94,20 +94,6 @@ client.upload_bytes(urls.upload_url, b"Hello from an agent!")
 data = client.download_bytes(urls.download_url)
 ```
 
-### First Time Setup
-
-```bash
-# Install Solana CLI
-sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
-
-# Create wallet
-solana-keygen new --outfile ~/.config/solana/id.json
-
-# Get free test SOL
-solana config set --url devnet
-solana airdrop 2
-```
-
 ---
 
 ## Async Client
@@ -120,8 +106,8 @@ from pynukez import AsyncNukez
 async with AsyncNukez(keypair_path="~/.config/solana/id.json") as client:
     price = await client.get_price()
     request = await client.request_storage(units=1)
-    transfer = await client.solana_transfer(request.pay_to_address, request.amount_sol)
-    receipt = await client.confirm_storage(request.pay_req_id, transfer.signature)
+    # ... execute the transfer externally, capture tx_sig ...
+    receipt = await client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
     files = await client.list_files(receipt.id)
 ```
 
@@ -134,21 +120,20 @@ Use `AsyncNukez` for FastAPI, MCP servers, and event-loop contexts.
 ```python
 from pynukez import Nukez
 
-# Solana-only
+# Solana-paid lockers (Ed25519 envelope signing)
 client = Nukez(
     keypair_path="~/.config/solana/id.json",
     network="devnet",                           # or "mainnet-beta"
     base_url="https://api.nukez.xyz",           # default
-    rpc_url="https://api.devnet.solana.com",    # default
 )
 
-# EVM-only (Monad)
+# EVM-paid lockers (secp256k1 envelope signing)
 client = Nukez(
     evm_private_key_path="~/.keys/evm_key.json",
     network="devnet",
 )
 
-# Dual-key (Solana signing + EVM payment)
+# Dual-key (Ed25519 for Solana-paid, secp256k1 for EVM-paid)
 client = Nukez(
     keypair_path="~/.config/solana/id.json",
     evm_private_key_path="~/.keys/evm_key.json",
@@ -162,13 +147,12 @@ client = Nukez(signing_key=my_custom_signer)
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `keypair_path` | `str \| Path` | `None` | Path to Solana keypair JSON |
+| `keypair_path` | `str \| Path` | `None` | Path to Ed25519 keypair JSON used to sign envelopes for Solana-paid lockers |
 | `base_url` | `str` | `NUKEZ_BASE_URL` env or `https://api.nukez.xyz` | Gateway API URL |
 | `network` | `str` | `"devnet"` | Network target |
-| `rpc_url` | `str` | `"https://api.devnet.solana.com"` | Solana RPC endpoint |
 | `timeout` | `int` | `None` | HTTP request timeout (seconds) |
-| `evm_private_key_path` | `str \| Path` | `None` | Path to EVM private key (JSON or hex) |
-| `evm_rpc_url` | `str` | `None` | EVM RPC endpoint |
+| `evm_private_key_path` | `str \| Path` | `None` | Path to EVM private key used for secp256k1 envelope signing |
+| `evm_rpc_url` | `str` | `None` | Reserved; currently unused at the SDK layer |
 | `signing_key` | `Signer` | `None` | Explicit Signer instance (overrides keypair) |
 
 Both clients support context managers:
@@ -189,11 +173,13 @@ finally:
 
 ## Payment Flow (x402 Protocol)
 
-Nukez uses the x402 HTTP 402 Payment Required protocol. The flow is always three explicit steps:
+Nukez uses the x402 HTTP 402 Payment Required protocol. **pynukez does NOT move funds** — the SDK tells you what to pay and confirms you paid. You execute the transfer externally (wallet, CLI, another tool, hardware signer).
 
-1. **Request** -- `request_storage()` returns payment instructions (address, amount, `pay_req_id`)
-2. **Pay** -- `solana_transfer()` or `evm_transfer()` executes the on-chain payment
-3. **Confirm** -- `confirm_storage()` presents `pay_req_id` + tx signature, gateway verifies on-chain, returns receipt
+The flow is always three explicit steps:
+
+1. **Request** -- `request_storage()` returns payment instructions (address, amount, asset, chain, `pay_req_id`)
+2. **Pay** -- You execute the transfer out-of-band and capture the tx signature
+3. **Confirm** -- `confirm_storage()` presents `pay_req_id` + your tx signature, gateway verifies on-chain, returns receipt
 
 The receipt is the root credential. All subsequent operations require the `receipt_id`.
 
@@ -212,6 +198,7 @@ request.amount_sol       # SOL amount (Solana)
 request.amount_raw       # Atomic units (any chain)
 request.payment_options  # All available chain/asset combos
 request.is_evm           # True if default option is EVM
+request.next_step        # Human-readable guidance for the agent
 ```
 
 | Parameter | Type | Default | Description |
@@ -221,36 +208,21 @@ request.is_evm           # True if default option is EVM
 | `pay_network` | `str` | `None` | Payment chain: `"solana-devnet"`, `"monad-testnet"` |
 | `pay_asset` | `str` | `None` | Payment token: `"SOL"`, `"MON"`, `"USDC"`, `"USDT"`, `"WETH"` |
 
-#### `solana_transfer(to_address, amount_sol)` -> `TransferResult`
+#### Executing the payment
 
-Execute a Solana SOL payment.
+pynukez 4.0.0 removed `solana_transfer()` and `evm_transfer()`. The SDK intentionally does not handle private-key-holding transfer execution. Use your preferred tool to move funds:
 
-```python
-transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
-transfer.signature  # Base58 tx signature
-```
+- **Solana**: `solana transfer`, a wallet (Phantom, Backpack, Solflare), or a signing relay
+- **EVM (Monad, etc.)**: MetaMask, `cast send`, `web3.py`, a wallet/relay, or a hardware signer
 
-#### `evm_transfer(to_address, amount_raw, pay_asset="MON", token_address=None, network="monad-testnet")` -> `TransferResult`
-
-Execute an EVM payment (MON, WETH, USDC, etc.).
-
-```python
-transfer = client.evm_transfer(
-    to_address=request.pay_to_address,
-    amount_raw=request.amount_raw,
-    pay_asset=request.pay_asset,
-    token_address=request.token_address,
-    network=request.network,
-)
-transfer.signature  # 0x-prefixed tx hash
-```
+When the transfer lands and you have a signature, pass it to `confirm_storage`.
 
 #### `confirm_storage(pay_req_id, tx_sig, ...)` -> `Receipt`
 
 Confirm payment and get your receipt.
 
 ```python
-receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
+receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)
 receipt.id          # YOUR KEY TO EVERYTHING - save this!
 receipt.locker_id   # Derived automatically
 ```
@@ -258,7 +230,7 @@ receipt.locker_id   # Derived automatically
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `pay_req_id` | `str` | required | Payment request ID from `request_storage()` |
-| `tx_sig` | `str` | required | Transaction signature from `solana_transfer()` / `evm_transfer()` |
+| `tx_sig` | `str` | required | On-chain transaction signature for the payment you executed externally |
 | `max_retries` | `int` | `5` | Retry count for blockchain confirmation |
 | `initial_delay` | `float` | `2.0` | Initial retry delay in seconds |
 | `payment_chain` | `str` | `None` | Chain ID (required for EVM) |
@@ -267,8 +239,8 @@ receipt.locker_id   # Derived automatically
 
 ### Multi-Chain Payment Options
 
-| Chain | Token | Signature Algorithm |
-|-------|-------|---------------------|
+| Chain | Token | Envelope Signature Algorithm |
+|-------|-------|------------------------------|
 | Solana | SOL | Ed25519 |
 | Solana | USDC | Ed25519 |
 | Solana | USDT | Ed25519 |
@@ -281,20 +253,17 @@ receipt.locker_id   # Derived automatically
 request = client.request_storage(units=1)
 
 if request.is_evm:
-    transfer = client.evm_transfer(
-        request.pay_to_address, request.amount_raw,
-        pay_asset=request.pay_asset,
-        token_address=request.token_address,
-        network=request.network,
-    )
+    # You execute the EVM transfer externally; capture the tx hash
+    tx_sig = "..."
     receipt = client.confirm_storage(
-        request.pay_req_id, transfer.signature,
+        request.pay_req_id, tx_sig=tx_sig,
         payment_chain=request.network,
         payment_asset=request.pay_asset,
     )
 else:
-    transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
-    receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
+    # You execute the Solana transfer externally; capture the tx signature
+    tx_sig = "..."
+    receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
 ```
 
 ---
@@ -803,15 +772,10 @@ price = get_current_price(units=5)
 |--------|---------|-------------|
 | `get_price(units=1)` | `PriceInfo` | Current storage pricing |
 | `get_provider_info(provider="gcs")` | `ProviderInfo` | Provider capabilities and limits |
-| `get_wallet_info()` | `WalletInfo` | Wallet balance and address |
-| `sign_message(message)` | `str` | Sign arbitrary message string |
 
 ```python
 price = client.get_price(units=1)
 print(f"Cost: {price.amount_sol} SOL (${price.total_usd})")
-
-wallet = client.get_wallet_info()
-print(f"Balance: {wallet.balance_sol} SOL")
 
 info = client.get_provider_info("mongodb")
 print(info.supports_signed_urls, info.max_object_size)
@@ -832,7 +796,6 @@ All errors inherit from `NukezError`. Each has a `retryable` attribute indicatin
 | `NukezFileNotFoundError` | 404 | No | Check `list_files()` or `create_file()` first |
 | `URLExpiredError` | 403/410 | Yes | Call `get_file_urls()` to refresh signed URLs |
 | `NukezNotProvisionedError` | 412 | No | Call `provision_locker()` first |
-| `InsufficientFundsError` | -- | No | Add SOL/MON to wallet |
 | `RateLimitError` | 429 | Yes | Wait `e.retry_after` seconds |
 
 ```python
@@ -909,16 +872,6 @@ All types are plain Python `@dataclass` objects.
 | `sig_alg` | `str` | Signature algorithm used |
 | `locker_id` | property | Derived locker ID |
 
-**`TransferResult`**
-| Field | Type | Description |
-|-------|------|-------------|
-| `signature` | `str` | Transaction signature |
-| `to_address` | `str` | Destination |
-| `amount_sol` | `float` | Amount |
-| `network` | `str` | Network |
-| `chain` | `str` | `"solana"` or `"monad"` |
-| `pay_asset` | `str` | Token symbol |
-
 **`PriceInfo`**
 | Field | Type | Description |
 |-------|------|-------------|
@@ -976,8 +929,6 @@ All types are plain Python `@dataclass` objects.
 **`UploadResult`** -- `upload_url`, `size_bytes`, `content_type`, `uploaded_at`
 
 **`DeleteResult`** -- `filename`, `deleted`, `deleted_at`
-
-**`WalletInfo`** -- `pubkey`, `balance_sol`, `network`
 
 ### Verification Types
 
@@ -1094,9 +1045,8 @@ print(instructions["quickstart_flow"])
 | What you want | Code |
 |---------------|------|
 | Buy storage | `request = client.request_storage()` |
-| Pay (Solana) | `transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)` |
-| Pay (EVM) | `transfer = client.evm_transfer(request.pay_to_address, request.amount_raw, ...)` |
-| Get receipt | `receipt = client.confirm_storage(request.pay_req_id, transfer.signature)` |
+| Pay | Execute the transfer externally (wallet, CLI, another tool) — pynukez does not move funds |
+| Get receipt | `receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_sig>)` |
 | Setup locker | `client.provision_locker(receipt.id)` |
 | Store bytes | `urls = client.create_file(receipt.id, "f.txt")` then `client.upload_bytes(urls.upload_url, data)` |
 | Store file | `client.upload_file_path(receipt.id, "/path/to/file.pdf")` |
@@ -1117,12 +1067,9 @@ print(instructions["quickstart_flow"])
 |----------|---------|-------------|
 | `NUKEZ_BASE_URL` | `https://api.nukez.xyz` | Gateway API URL |
 | `NUKEZ_NETWORK` | `devnet` | Default network |
-| `NUKEZ_KEYPAIR_PATH` | -- | Solana keypair path |
+| `NUKEZ_KEYPAIR_PATH` | -- | Ed25519 keypair path |
 | `NUKEZ_WALLET_PATH` | -- | Alternative keypair path |
-| `NUKEZ_RPC_URL` | `https://api.devnet.solana.com` | Solana RPC endpoint |
 | `PYNUKEZ_UPLOAD_STRING_MAX_BYTES` | `262144` (256 KB) | Max upload_string size |
-| `MONAD_TESTNET_RPC_PRIMARY` | -- | Monad testnet RPC |
-| `MONAD_MAINNET_RPC_PRIMARY` | -- | Monad mainnet RPC |
 
 ---
 
@@ -1142,8 +1089,7 @@ client = Nukez(keypair_path="~/.config/solana/id.json", network="mainnet-beta")
 
 | Problem | Fix |
 |---------|-----|
-| "Transaction not found" | Wait 3 seconds, retry `confirm_storage()` (auto-retries 5 times) |
-| "Insufficient funds" | `solana airdrop 2` (devnet) or fund wallet (mainnet) |
+| "Transaction not found" | The tx hasn't propagated yet. Wait a few seconds, retry `confirm_storage()` (auto-retries 5 times) |
 | "URL expired" | `client.get_file_urls(receipt_id, filename)` for fresh URLs |
 | "File not found" | Check `client.list_files(receipt_id)` |
 | "Locker not provisioned" | Call `client.provision_locker(receipt_id)` first |

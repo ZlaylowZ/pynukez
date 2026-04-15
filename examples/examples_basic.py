@@ -2,9 +2,12 @@
 Basic example - store and retrieve data.
 
 Prerequisites:
-    pip install pynukez[solana]
-    solana-keygen new --outfile ~/.config/solana/id.json  (if you don't have one)
-    solana config set --url devnet && solana airdrop 2   (for devnet testing)
+    pip install pynukez
+    # An Ed25519 keypair JSON file (e.g. one produced by solana-keygen)
+    # used to sign envelopes for Solana-paid lockers.
+
+pynukez does NOT move funds. You execute the transfer yourself (wallet,
+CLI, another tool) and hand the resulting tx signature to confirm_storage().
 
 Run:
     python examples/examples_basic.py
@@ -15,24 +18,33 @@ from pynukez import Nukez
 # Setup (devnet by default)
 client = Nukez(keypair_path="~/.config/solana/id.json")
 
-# Step 1: Buy storage (3-step x402 payment flow)
-print("Purchasing storage...")
+# Step 1: Request a storage quote. This returns payment instructions:
+# address, amount, asset, chain. pynukez will NOT execute the transfer.
+print("Requesting storage quote...")
 request = client.request_storage(units=1)
-transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
-receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
+print(f"Pay {request.amount or request.amount_sol} {request.pay_asset} "
+      f"to {request.pay_to_address} on {request.network}")
+print(f"Next step: {request.next_step}")
+
+# Step 2: Execute the transfer externally (wallet, CLI, another tool).
+# Then capture the resulting transaction signature and paste it below.
+tx_sig = input("Paste the transaction signature when the transfer is confirmed: ").strip()
+
+# Step 3: Close the loop with the gateway.
+receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
 print(f"Receipt: {receipt.id}  (SAVE THIS — it's your root credential)")
 
-# Step 2: Provision the locker (one-time, per receipt)
+# Step 4: Provision the locker (one-time, per receipt)
 client.provision_locker(receipt.id)
 
-# Step 3: Create a file entry and get signed upload/download URLs
+# Step 5: Create a file entry and get signed upload/download URLs
 urls = client.create_file(receipt.id, "hello.txt", content_type="text/plain")
 
-# Step 4: Upload raw bytes to the signed URL
+# Step 6: Upload raw bytes to the signed URL
 client.upload_bytes(urls.upload_url, b"Hello, World!")
 print("Uploaded!")
 
-# Step 5: Confirm the file so the gateway records its content hash
+# Step 7: Confirm the file so the gateway records its content hash
 #   (optional but recommended — enables attestation + merkle proofs)
 if urls.confirm_url:
     # v3.4.0+ gateways return an absolute confirm_url in the create response
@@ -41,6 +53,6 @@ else:
     # Older gateways: call without confirm_url, SDK falls back to hardcoded path
     client.confirm_file(receipt.id, urls.filename)
 
-# Step 6: Retrieve the data
+# Step 8: Retrieve the data
 data = client.download_bytes(urls.download_url)
 print(f"Downloaded: {data}")

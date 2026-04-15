@@ -8,8 +8,8 @@ reused directly from the sync client and auth modules.
 Usage:
     async with AsyncNukez(keypair_path="~/.config/solana/id.json") as client:
         request = await client.request_storage(units=1)
-        transfer = await client.solana_transfer(request.pay_to_address, request.amount_sol)
-        receipt = await client.confirm_storage(request.pay_req_id, transfer.signature)
+        # ... user executes the transfer externally (wallet, CLI) ...
+        receipt = await client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)
 
         manifest = await client.provision_locker(receipt.id)
         urls = await client.create_file(receipt.id, "data.txt")
@@ -37,7 +37,6 @@ from urllib.parse import urlencode
 
 from .types import (
     StorageRequest,
-    TransferResult,
     Receipt,
     NukezManifest,
     FileUrls,
@@ -45,7 +44,6 @@ from .types import (
     UploadResult,
     DeleteResult,
     VerificationResult,
-    WalletInfo,
     PriceInfo,
     ConfirmResult,
     BatchConfirmResult,
@@ -78,9 +76,6 @@ from .hardening import sanitize_upload_data, validate_signed_url
 from ._async_http import AsyncHTTPClient
 from ._http import caip2_to_friendly
 
-# Lazy import for optional Solana support
-SolanaPayment = None
-
 VIEWER_RENDERER_CONTRACT_NAME = "nukez.mcp.viewer_link"
 VIEWER_RENDERER_CONTRACT_VERSION = "1.0"
 VIEWER_RENDERER_VARIANT = "nukez-neon"
@@ -103,21 +98,6 @@ _SANDBOX_PATH_BLOCKED_MARKERS = (
 )
 
 
-def _get_solana_payment():
-    """Lazy import SolanaPayment to avoid requiring solana libs for non-payment ops."""
-    global SolanaPayment
-    if SolanaPayment is None:
-        try:
-            from .payment import SolanaPayment as _SolanaPayment
-            SolanaPayment = _SolanaPayment
-        except ImportError:
-            raise ImportError(
-                "Solana libraries required for payment operations. "
-                "Install with: pip install pynukez[solana]"
-            )
-    return SolanaPayment
-
-
 class AsyncNukez:
     """
     Async agent-native Nukez client.
@@ -136,7 +116,6 @@ class AsyncNukez:
         keypair_path: Optional[Union[str, Path]] = None,
         base_url: str = os.environ.get("NUKEZ_BASE_URL", "https://api.nukez.xyz"),
         network: str = "devnet",
-        rpc_url: Optional[str] = "https://api.devnet.solana.com",
         timeout: int = None,
         evm_private_key_path: Optional[Union[str, Path]] = None,
         evm_rpc_url: Optional[str] = None,
@@ -145,7 +124,6 @@ class AsyncNukez:
     ):
         self.base_url = base_url.rstrip('/')
         self.network = network
-        self.rpc_url = rpc_url
         self.timeout = timeout or 120
         self.http = AsyncHTTPClient(base_url, timeout=self.timeout)
         self._raw_client = _httpx.AsyncClient(timeout=60, follow_redirects=True)
@@ -172,8 +150,9 @@ class AsyncNukez:
 
         if signing_key is not None:
             self._signer = signing_key
-            # Still initialize keypair for payment operations (solana_transfer)
-            # even when an external signing_key is provided for envelope signing.
+            # Keep the Ed25519 Keypair around when the caller also supplied
+            # keypair_path — it's still the default envelope signer for
+            # Solana-paid lockers on dual-key clients.
             if keypair_path:
                 self.keypair = Keypair(keypair_path)
         elif keypair_path:
@@ -183,23 +162,6 @@ class AsyncNukez:
             from .signer import EVMSigner
             self._signer = EVMSigner.from_file(str(evm_private_key_path))
 
-        if keypair_path and evm_private_key_path and signing_key is None:
-            pass  # Ed25519 keypair signs envelopes (backward compat)
-
-        # Fail-fast: if caller wants EVM payments, verify web3 is available now
-        # (before the dual-signer init below, so the import is validated early)
-        if evm_private_key_path:
-            try:
-                from .evm_payment import HAS_WEB3
-            except ImportError:
-                HAS_WEB3 = False
-            if not HAS_WEB3:
-                raise ImportError(
-                    "web3 libraries required for EVM payments "
-                    "(evm_private_key_path was provided). "
-                    "Install with: pip install pynukez[evm]"
-                )
-
         # Per-receipt state: receipt_id → _ReceiptState(owner_identity, sig_alg).
         # Single source of truth for owner delegation detection (_is_delegating)
         # and dual-key signer auto-selection (_require_signer). Written
@@ -207,12 +169,9 @@ class AsyncNukez:
         # same validation path (conflict detection, sig_alg inference).
         self._receipt_state: Dict[str, _ReceiptState] = {}
 
-        # Lazy-initialized payment handlers
-        self._payment = None
         self._keypair_path = keypair_path
         self._evm_private_key_path = evm_private_key_path
         self._evm_rpc_url = evm_rpc_url
-        self._evm_payment = None
 
         # Store both signers for dual-key clients (EVM + Ed25519).
         # _signer is the default; _evm_signer is the EVM-specific one.
@@ -383,15 +342,6 @@ class AsyncNukez:
             identity = self._signer.identity
         self.bind_receipt(receipt_id=receipt_id, owner_identity=identity)
 
-    def _require_keypair(self, operation: str) -> Keypair:
-        """Ensure keypair is available. Deprecated — use _require_signer."""
-        if not self.keypair:
-            raise NukezError(
-                f"{operation} requires keypair_path. "
-                f"Initialize AsyncNukez(keypair_path='~/.config/solana/id.json')"
-            )
-        return self.keypair
-
     @staticmethod
     def _infer_content_type(filename: str, explicit: Optional[str] = None) -> str:
         """Infer MIME type from filename when explicit value is not provided."""
@@ -542,11 +492,6 @@ class AsyncNukez:
             data = data.encode('utf-8')
         return hashlib.sha256(data).hexdigest()
 
-    def sign_message(self, message: str) -> str:
-        """Sign message with current keypair (pure computation, sync)."""
-        keypair = self._require_keypair("sign_message")
-        return keypair.sign_message(message.encode('utf-8'))
-
     def get_provider_info(self, provider: str = "gcs"):
         """Get capabilities for a storage provider (pure lookup, sync)."""
         from .types import PROVIDERS
@@ -678,77 +623,6 @@ class AsyncNukez:
 
             return request
 
-    async def solana_transfer(
-        self,
-        to_address: str,
-        amount_sol: Union[str, float],
-    ) -> TransferResult:
-        """Step 2: Execute Solana SOL transfer (wraps sync payment in thread)."""
-        self._require_keypair("solana_transfer")
-
-        if self._payment is None:
-            PaymentClass = _get_solana_payment()
-            self._payment = PaymentClass(
-                keypair_path=str(self.keypair.keypair_path),
-                network=self.network,
-                rpc_url=self.rpc_url,
-            )
-
-        signature = await asyncio.to_thread(
-            self._payment.transfer_sol,
-            to_address=to_address,
-            amount_sol=float(amount_sol),
-        )
-
-        return TransferResult(
-            signature=signature,
-            to_address=to_address,
-            amount_sol=float(amount_sol),
-            network=self.network,
-        )
-
-    async def evm_transfer(
-        self,
-        to_address: str,
-        amount_raw: int,
-        pay_asset: str = "MON",
-        token_address: Optional[str] = None,
-        network: str = "monad-testnet",
-    ) -> TransferResult:
-        """Step 2 (EVM): Execute EVM token transfer for storage payment."""
-        if self._evm_payment is None:
-            if not self._evm_private_key_path:
-                raise NukezError(
-                    "EVM private key not configured. Pass evm_private_key_path "
-                    "to the AsyncNukez constructor, or use solana_transfer() for "
-                    "Solana payments."
-                )
-            from .evm_payment import EVMPayment
-            self._evm_payment = EVMPayment(
-                private_key_path=self._evm_private_key_path,
-                network=network,
-                rpc_url=self._evm_rpc_url,
-            )
-
-        tx_hash = await asyncio.to_thread(
-            self._evm_payment.transfer,
-            to_address=to_address,
-            amount_raw=amount_raw,
-            pay_asset=pay_asset,
-            token_address=token_address,
-        )
-
-        return TransferResult(
-            signature=tx_hash,
-            to_address=to_address,
-            amount_sol=0.0,
-            network=network,
-            chain="evm",
-            pay_asset=pay_asset,
-            amount_raw=amount_raw,
-            tx_hash=tx_hash,
-        )
-
     async def confirm_storage(
         self,
         pay_req_id: str,
@@ -780,7 +654,7 @@ class AsyncNukez:
                 "Auto-binding Ed25519 operator for EVM payments is deprecated. "
                 "EVM owners can now operate directly with secp256k1 envelopes. "
                 "Pass operator_pubkey explicitly or set auto_bind_operator=False. "
-                "This behavior will be removed in pynukez 4.0.",
+                "This behavior will be removed in pynukez 5.0.",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -2433,30 +2307,6 @@ class AsyncNukez:
             elapsed_sec=round(elapsed, 2),
             errors=errors,
             files=files_out,
-        )
-
-    # ------------------------------------------------------------------
-    # WALLET
-    # ------------------------------------------------------------------
-
-    async def get_wallet_info(self) -> WalletInfo:
-        """Get wallet information for current keypair (wraps sync in thread)."""
-        self._require_keypair("get_wallet_info")
-
-        if self._payment is None:
-            PaymentClass = _get_solana_payment()
-            self._payment = PaymentClass(
-                keypair_path=str(self.keypair.keypair_path),
-                network=self.network,
-                rpc_url=self.rpc_url,
-            )
-
-        balance = await asyncio.to_thread(self._payment.get_balance)
-
-        return WalletInfo(
-            pubkey=self._payment.pubkey,
-            balance_sol=balance,
-            network=self.network,
         )
 
     # ------------------------------------------------------------------

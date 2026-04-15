@@ -28,7 +28,6 @@ from dataclasses import dataclass
 from urllib.parse import urlencode
 from .types import (
     StorageRequest,
-    TransferResult,
     Receipt,
     NukezManifest,
     FileUrls,
@@ -36,7 +35,6 @@ from .types import (
     UploadResult,
     DeleteResult,
     VerificationResult,
-    WalletInfo,
     PriceInfo,
     ConfirmResult,
     BatchConfirmResult,
@@ -95,9 +93,6 @@ from ._helpers import (
     make_file_preview_block,
 )
 
-# Lazy import for optional Solana support
-SolanaPayment = None
-
 VIEWER_RENDERER_CONTRACT_NAME = "nukez.mcp.viewer_link"
 VIEWER_RENDERER_CONTRACT_VERSION = "1.0"
 VIEWER_RENDERER_VARIANT = "nukez-neon"
@@ -108,19 +103,6 @@ SANDBOX_INGEST_MAX_PART_BYTES = 512 * 1024
 SANDBOX_INGEST_MIN_PART_BYTES = 4 * 1024
 SANDBOX_INGEST_EXECUTION_MODE = os.getenv("PYNUKEZ_SANDBOX_EXECUTION_MODE", "sandbox")
 
-def _get_solana_payment():
-    """Lazy import SolanaPayment to avoid requiring solana libs for non-payment ops."""
-    global SolanaPayment
-    if SolanaPayment is None:
-        try:
-            from .payment import SolanaPayment as _SolanaPayment
-            SolanaPayment = _SolanaPayment
-        except ImportError:
-            raise ImportError(
-                "Solana libraries required for payment operations. "
-                "Install with: pip install pynukez[solana]"
-            )
-    return SolanaPayment
 
 class Nukez:
     """
@@ -131,12 +113,13 @@ class Nukez:
     
     Basic Usage:
         client = Nukez(keypair_path="~/.config/solana/id.json")
-        
-        # Payment flow (explicit steps)
+
+        # Payment flow (the SDK does NOT move funds — you pay out-of-band
+        # and hand us the tx signature to confirm)
         request = client.request_storage(units=1)
-        transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
-        receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
-        
+        # ... user executes the transfer externally (wallet, CLI, another tool) ...
+        receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)
+
         # File operations (require receipt_id)
         manifest = client.provision_locker(receipt.id)
         urls = client.create_file(receipt.id, "data.txt")
@@ -154,7 +137,6 @@ class Nukez:
         keypair_path: Optional[Union[str, Path]] = None,
         base_url: str = os.environ.get("NUKEZ_BASE_URL", "https://api.nukez.xyz"),
         network: str = "devnet",
-        rpc_url: Optional[str] = "https://api.devnet.solana.com",
         timeout: int = None,
         evm_private_key_path: Optional[Union[str, Path]] = None,
         evm_rpc_url: Optional[str] = None,
@@ -165,37 +147,39 @@ class Nukez:
         Initialize Nukez client.
 
         Args:
-            keypair_path: Path to Solana keypair file (Ed25519 signing + Solana payments)
+            keypair_path: Path to Ed25519 keypair JSON file used to sign
+                envelopes for Solana-paid lockers.
             base_url: Nukez API base URL
-            network: Solana network ("devnet" or "mainnet-beta")
-            rpc_url: Solana RPC URL
+            network: Solana network identifier ("devnet" or "mainnet-beta")
+                used for signed-envelope context.
             timeout: HTTP timeout in seconds
             evm_private_key_path: Path to EVM private key JSON file.
-                When only this is provided (no keypair_path), the EVM key
-                is used for both payment AND envelope signing (secp256k1).
-            evm_rpc_url: EVM RPC URL override.
-            auto_bind_operator: When True (default), auto-bind Ed25519 keypair
-                as operator for EVM payments. Deprecated — set False for
-                EVM-native owners who sign their own envelopes.
+                The EVM key is used for secp256k1 envelope signing on
+                EVM-paid lockers. Does NOT move funds — pynukez no longer
+                executes transfers.
+            evm_rpc_url: Reserved; currently unused at the SDK layer.
+            auto_bind_operator: When True (default), auto-bind Ed25519
+                keypair as operator on EVM-paid lockers at confirm time.
+                Deprecated — set False for EVM-native owners.
             signing_key: Explicit Signer instance for envelope signing.
                 Takes priority over keypair_path and evm_private_key_path.
 
         Example:
-            # Solana only
+            # Solana-paid locker (Ed25519 envelopes)
             client = Nukez(keypair_path="~/.config/solana/id.json")
 
-            # EVM-only owner (signs envelopes with secp256k1)
-            client = Nukez(evm_private_key_path="~/.keys/treasuries/gateway/staging/evm_key.json",
+            # EVM-paid locker, owner signs envelopes directly (secp256k1)
+            client = Nukez(evm_private_key_path="~/.keys/evm_key.json",
                            auto_bind_operator=False)
 
-            # Dual-key (Ed25519 for signing, EVM for payment)
-            client = Nukez(keypair_path="~/.keys/treasuries/gateway/staging/svm_key.json",
-                           evm_private_key_path="~/.keys/treasuries/gateway/staging/evm_key.json")
+            # Dual-key (Ed25519 envelope signing + EVM envelope signing
+            # for EVM-paid lockers)
+            client = Nukez(keypair_path="~/.keys/svm_key.json",
+                           evm_private_key_path="~/.keys/evm_key.json")
         """
 
         self.base_url = base_url.rstrip('/')
         self.network = network
-        self.rpc_url = rpc_url
         self.timeout = timeout or 120
         self.http = HTTPClient(base_url, timeout=self.timeout)
         self._raw_client = _httpx.Client(timeout=60, follow_redirects=True)
@@ -221,39 +205,19 @@ class Nukez:
 
         if signing_key is not None:
             self._signer = signing_key
-            # Still initialize keypair for payment operations (solana_transfer)
-            # even when an external signing_key is provided for envelope signing.
+            # Keep the Ed25519 Keypair around when the caller also supplied
+            # keypair_path — it's still the default envelope signer for
+            # Solana-paid lockers on dual-key clients.
             if keypair_path:
                 self.keypair = Keypair(keypair_path)
         elif keypair_path:
             self.keypair = Keypair(keypair_path)
             self._signer = self.keypair
         elif evm_private_key_path:
-            # EVM-only: use EVM key for both payment AND envelope signing
+            # EVM-only: use EVM key for envelope signing (secp256k1)
             from .signer import EVMSigner
             self._signer = EVMSigner.from_file(str(evm_private_key_path))
             # self.keypair stays None — no Ed25519 keypair
-
-        # If keypair_path AND evm_private_key_path both provided,
-        # Ed25519 keypair signs envelopes (backward compat). EVM key
-        # is only for evm_transfer() payment.
-        if keypair_path and evm_private_key_path and signing_key is None:
-            # keypair already set above, _signer already points to it
-            pass
-
-        # Fail-fast: if caller wants EVM payments, verify web3 is available now
-        # rather than deferring the error to the first evm_transfer() call.
-        if evm_private_key_path:
-            try:
-                from .evm_payment import HAS_WEB3
-            except ImportError:
-                HAS_WEB3 = False
-            if not HAS_WEB3:
-                raise ImportError(
-                    "web3 libraries required for EVM payments "
-                    "(evm_private_key_path was provided). "
-                    "Install with: pip install pynukez[evm]"
-                )
 
         # Per-receipt state: receipt_id → _ReceiptState(owner_identity, sig_alg).
         # Single source of truth for owner delegation detection (_is_delegating)
@@ -262,12 +226,9 @@ class Nukez:
         # the same validation path (conflict detection, sig_alg inference).
         self._receipt_state: Dict[str, _ReceiptState] = {}
 
-        # Lazy-initialized payment handlers
-        self._payment = None
         self._keypair_path = keypair_path
         self._evm_private_key_path = evm_private_key_path
         self._evm_rpc_url = evm_rpc_url
-        self._evm_payment = None
 
         # Store both signers for dual-key clients (EVM + Ed25519).
         # _signer is the default; _evm_signer is the EVM-specific one.
@@ -489,17 +450,6 @@ class Nukez:
             identity = self._signer.identity
         self.bind_receipt(receipt_id=receipt_id, owner_identity=identity)
 
-    def _require_keypair(self, operation: str) -> Keypair:
-        """Ensure keypair is available. Deprecated — use _require_signer."""
-        # Backward compat: some operations (solana_transfer, get_wallet_info)
-        # genuinely need the Ed25519 Keypair, not just any Signer.
-        if not self.keypair:
-            raise NukezError(
-                f"{operation} requires keypair_path. "
-                f"Initialize Nukez(keypair_path='~/.config/solana/id.json')"
-            )
-        return self.keypair
-    
     # =========================================================================
     # DISCOVERY & PRICING (No auth required)
     # =========================================================================
@@ -679,125 +629,6 @@ class Nukez:
                     break
 
             return request
-    
-    def solana_transfer(
-        self, 
-        to_address: str, 
-        amount_sol: Union[str, float]
-    ) -> TransferResult:
-        """
-        Step 2: Execute Solana SOL transfer.
-        
-        Args:
-            to_address: Destination Solana address (from request.pay_to_address)
-            amount_sol: Amount in SOL (from request.amount_sol)
-            
-        Returns:
-            TransferResult with:
-            - signature: Transaction signature (use in confirm_storage)
-            - to_address: Destination address
-            - amount_sol: Amount transferred
-            - network: Solana network
-        """
-        self._require_keypair("solana_transfer")
-        
-        # Lazy initialize payment handler
-        if self._payment is None:
-            PaymentClass = _get_solana_payment()
-            self._payment = PaymentClass(
-                keypair_path=str(self.keypair.keypair_path),
-                network=self.network,
-                rpc_url=self.rpc_url,
-            )
-        
-        signature = self._payment.transfer_sol(
-            to_address=to_address,
-            amount_sol=float(amount_sol)
-        )
-        
-        result = TransferResult(
-            signature=signature,
-            to_address=to_address,
-            amount_sol=float(amount_sol),
-            network=self.network
-        )
-
-        return result
-
-    def evm_transfer(
-        self,
-        to_address: str,
-        amount_raw: int,
-        pay_asset: str = "MON",
-        token_address: Optional[str] = None,
-        network: str = "monad-testnet",
-    ) -> TransferResult:
-        """
-        Step 2 (EVM): Execute EVM token transfer for storage payment.
-
-        Use when request_storage() returns an EVM network (is_evm=True).
-
-        Args:
-            to_address: Destination 0x address (from request.pay_to_address)
-            amount_raw: Atomic units (from request.amount_raw)
-            pay_asset: Token symbol (from request.pay_asset)
-            token_address: ERC-20 contract (from request.token_address, None for native)
-            network: EVM network (from request.network)
-
-        Returns:
-            TransferResult with tx_hash for confirm_storage()
-
-        Next step:
-            Call confirm_storage(pay_req_id=request.pay_req_id, tx_sig=result.tx_hash,
-                                payment_chain=request.network, payment_asset=request.pay_asset)
-
-        Example:
-            request = client.request_storage(units=1, pay_network="monad-testnet", pay_asset="MON")
-            if request.is_evm:
-                transfer = client.evm_transfer(
-                    to_address=request.pay_to_address,
-                    amount_raw=request.amount_raw,
-                    pay_asset=request.pay_asset,
-                    token_address=request.token_address,
-                    network=request.network,
-                )
-                receipt = client.confirm_storage(
-                    request.pay_req_id, transfer.tx_hash,
-                    payment_chain=request.network,
-                    payment_asset=request.pay_asset,
-                )
-        """
-        if self._evm_payment is None:
-            if not self._evm_private_key_path:
-                raise NukezError(
-                    "EVM private key not configured. Pass evm_private_key_path "
-                    "to the Nukez constructor, or use solana_transfer() for "
-                    "Solana payments."
-                )
-            from .evm_payment import EVMPayment
-            self._evm_payment = EVMPayment(
-                private_key_path=self._evm_private_key_path,
-                network=network,
-                rpc_url=self._evm_rpc_url,
-            )
-
-        tx_hash = self._evm_payment.transfer(
-            to_address=to_address,
-            amount_raw=amount_raw,
-            pay_asset=pay_asset,
-            token_address=token_address,
-        )
-
-        return TransferResult(
-            signature=tx_hash,
-            to_address=to_address,
-            amount_sol=0.0,
-            network=network,
-            chain="evm",
-            pay_asset=pay_asset,
-            amount_raw=amount_raw,
-            tx_hash=tx_hash,
-        )
 
     def confirm_storage(
         self,
@@ -817,7 +648,9 @@ class Nukez:
 
         Args:
             pay_req_id: Payment request ID from request_storage()
-            tx_sig: Transaction signature from solana_transfer() or evm_transfer()
+            tx_sig: On-chain transaction signature for the payment.
+                You execute the transfer externally (wallet, CLI, etc.) and
+                hand us the signature — pynukez does not move funds.
             max_retries: Maximum retry attempts for tx_not_found (default: 5)
             initial_delay: Initial delay in seconds, doubles each retry (default: 2.0)
             payment_chain: Payment chain override (e.g. "monad-testnet") — Phase 1
@@ -863,7 +696,7 @@ class Nukez:
                 "Auto-binding Ed25519 operator for EVM payments is deprecated. "
                 "EVM owners can now operate directly with secp256k1 envelopes. "
                 "Pass operator_pubkey explicitly or set auto_bind_operator=False. "
-                "This behavior will be removed in pynukez 4.0.",
+                "This behavior will be removed in pynukez 5.0.",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -3145,46 +2978,6 @@ class Nukez:
         if isinstance(data, str):
             data = data.encode('utf-8')
         return hashlib.sha256(data).hexdigest()
-    
-    # =========================================================================
-    # UTILITIES
-    # =========================================================================
-    
-    def get_wallet_info(self) -> WalletInfo:
-        """
-        Get wallet information for current keypair.
-        
-        Returns:
-            WalletInfo with pubkey, balance, network
-        """
-        self._require_keypair("get_wallet_info")
-        
-        if self._payment is None:
-            PaymentClass = _get_solana_payment()
-            self._payment = PaymentClass(
-                keypair_path=str(self.keypair.keypair_path),
-                network=self.network,
-                rpc_url=self.rpc_url,
-            )
-        
-        return WalletInfo(
-            pubkey=self._payment.pubkey,
-            balance_sol=self._payment.get_balance(),
-            network=self.network
-        )
-    
-    def sign_message(self, message: str) -> str:
-        """
-        Sign message with current keypair.
-        
-        Args:
-            message: Message to sign
-            
-        Returns:
-            Base58-encoded signature
-        """
-        keypair = self._require_keypair("sign_message")
-        return keypair.sign_message(message.encode('utf-8'))
 
     # =========================================================================
     # CONFIRMATION & ATTESTATION (Trust boundary closure)

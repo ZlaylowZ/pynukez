@@ -20,41 +20,40 @@ client = Nukez(
 
 ### `request_storage(units=1)`
 
-Start the payment process.
+Start the payment process. Returns payment instructions — pynukez does not move funds.
 
 ```python
 request = client.request_storage(units=1)
 
 # Returns:
 request.pay_req_id      # Save this
-request.pay_to_address  # Send SOL here
-request.amount_sol      # This much
+request.pay_to_address  # Send payment here
+request.amount_sol      # SOL amount
+request.amount          # Human-readable amount (any chain)
+request.pay_asset       # Token symbol
+request.network         # Chain
+request.next_step       # Human-readable guidance
 ```
 
-### `solana_transfer(to_address, amount_sol)`
+### Execute the transfer (externally)
 
-Send the payment.
-
-```python
-transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
-
-# Returns:
-transfer.signature  # Transaction ID
-```
+pynukez 4.0.0 does not execute on-chain transfers. Use your wallet, CLI,
+or any other signer to send the amount to `request.pay_to_address`.
+Capture the resulting transaction signature for the next step.
 
 ### `confirm_storage(pay_req_id, tx_sig)`
 
 Confirm payment and get your receipt.
 
 ```python
-receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
+receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)
 
 # Returns:
 receipt.id          # YOUR KEY TO EVERYTHING - save this!
 receipt.locker_id   # Derived automatically
 ```
 
-> ⚠️ May raise `TransactionNotFoundError` if blockchain is slow. Wait 3 seconds and retry.
+> ⚠️ May raise `TransactionNotFoundError` if the tx hasn't propagated yet. Wait a few seconds and retry.
 
 ---
 
@@ -378,15 +377,6 @@ price = client.get_price(units=1)
 print(f"Cost: {price.amount_sol} SOL")
 ```
 
-### `get_wallet_info()`
-
-Check your wallet balance.
-
-```python
-wallet = client.get_wallet_info()
-print(f"Balance: {wallet.balance_sol} SOL")
-```
-
 ### `get_viewer_renderer_contract()`
 
 Return the renderer contract descriptor used by viewer handoff payloads.
@@ -421,11 +411,10 @@ All errors inherit from `NukezError`.
 
 | Error | When | What to do |
 |-------|------|------------|
-| `TransactionNotFoundError` | Blockchain is slow | Wait `e.suggested_delay` seconds, retry |
+| `TransactionNotFoundError` | tx not yet propagated | Wait `e.suggested_delay` seconds, retry |
 | `NukezFileNotFoundError` | File doesn't exist | Check `list_files()` |
 | `URLExpiredError` | URL older than 30 min | Call `get_file_urls()` |
 | `AuthenticationError` | Bad signature | Check keypair matches the one used to pay |
-| `InsufficientFundsError` | Wallet empty | Add SOL |
 
 ```python
 from pynukez import NukezError, TransactionNotFoundError

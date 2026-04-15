@@ -39,8 +39,10 @@ class StorageRequest:
     terms: Optional[Dict[str, Any]] = None                    # storage limits, TTL, file limits
     price_breakdown: Optional[Dict[str, Any]] = None          # cost components from price object
 
-    # Guide agent to next step
-    next_step: str = "Call solana_transfer() then confirm_storage()"
+    # Guide agent to next step. pynukez does not move funds — the agent is
+    # expected to execute the transfer out-of-band (wallet, CLI, another
+    # tool) and hand the resulting tx signature to confirm_storage().
+    next_step: str = ""
 
     @property
     def is_evm(self) -> bool:
@@ -51,14 +53,16 @@ class StorageRequest:
         if self.is_evm:
             self.next_step = (
                 f"Transfer {self.amount or '?'} {self.pay_asset} "
-                f"to {self.pay_to_address} on {self.network}, then "
-                f"confirm_storage(pay_req_id='{self.pay_req_id}', tx_sig=<0x_tx_hash>)"
+                f"to {self.pay_to_address} on {self.network}, then call "
+                f"confirm_storage(pay_req_id='{self.pay_req_id}', "
+                f"tx_sig=<your_tx_signature>)"
             )
         else:
             self.next_step = (
-                f"Call solana_transfer(to_address='{self.pay_to_address}', "
-                f"amount_sol={self.amount_sol}) then "
-                f"confirm_storage(pay_req_id='{self.pay_req_id}', tx_sig=<result>)"
+                f"Transfer {self.amount_sol} SOL "
+                f"to {self.pay_to_address} on {self.network}, then call "
+                f"confirm_storage(pay_req_id='{self.pay_req_id}', "
+                f"tx_sig=<your_tx_signature>)"
             )
         if self.payment_options:
             self.next_step += (
@@ -212,24 +216,6 @@ class PaymentOption:
         )
 
 @dataclass
-class TransferResult:
-    """Result from solana_transfer() or evm_transfer()."""
-    signature: str          # Solana sig (base58) or EVM tx hash (0x-prefixed)
-    to_address: str
-    amount_sol: float       # SOL amount (0.0 for EVM transfers)
-    network: str
-
-    # Multi-chain fields
-    chain: str = "solana"           # "solana" or "monad" or "ethereum"
-    pay_asset: str = "SOL"          # token symbol
-    amount_raw: Optional[int] = None  # atomic units (lamports, wei, token units)
-    tx_hash: str = ""               # chain-agnostic alias for signature
-
-    def __post_init__(self):
-        if not self.tx_hash:
-            self.tx_hash = self.signature
-
-@dataclass
 class NukezManifest:
     """Locker provisioning result from provision_locker()."""
     locker_id: str
@@ -314,13 +300,6 @@ class DeleteResult:
     filename: str
     deleted: bool
     deleted_at: Optional[str] = None
-
-@dataclass
-class WalletInfo:
-    """Wallet information from get_wallet_info()."""
-    pubkey: str
-    balance_sol: float
-    network: str
 
 @dataclass
 class DiscoveryDoc:

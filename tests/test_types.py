@@ -7,9 +7,9 @@ Tests all dataclasses, including expanded FileInfo fields (Phase 2).
 import pytest
 from pynukez.types import (
     StorageRequest, Receipt, FileUrls, VerificationResult,
-    PriceInfo, PaymentOption, TransferResult, NukezManifest,
+    PriceInfo, PaymentOption, NukezManifest,
     FileInfo, ViewerLink, FileViewerInfo, ViewerFileList,
-    UploadResult, DeleteResult, WalletInfo, ConfirmResult,
+    UploadResult, DeleteResult, ConfirmResult,
     BatchConfirmResult, AttestResult, BatchUploadResult,
     DownloadedFile, BatchDownloadResult, DiscoveryDoc,
     ProviderInfo, ViewerContainer,
@@ -51,13 +51,13 @@ class TestStorageRequest:
         assert sr.is_evm is True
 
     def test_next_step_default(self):
-        """Default next_step guides agent."""
+        """Default next_step guides agent to confirm_storage."""
         sr = StorageRequest(
             pay_req_id="pr_1", pay_to_address="addr1",
             amount_sol=0.001, amount_lamports=1000000,
             network="solana-devnet", units=1,
         )
-        assert "solana_transfer" in sr.next_step or "confirm_storage" in sr.next_step
+        assert "confirm_storage" in sr.next_step
 
 
 class TestFileInfo:

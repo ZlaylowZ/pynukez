@@ -1,18 +1,26 @@
 # PyNukez
 
-**Persistent storage for AI agents. Pay with SOL or MON, store anything, get cryptographic proof.**
+**Persistent storage for AI agents. Store anything, get a cryptographic receipt. pynukez does not move funds — you pay out-of-band and hand us the tx signature to confirm.**
 
 [![PyPI](https://img.shields.io/pypi/v/pynukez.svg)](https://pypi.org/project/pynukez/)
 [![Python](https://img.shields.io/pypi/pyversions/pynukez.svg)](https://pypi.org/project/pynukez/)
 [![License](https://img.shields.io/pypi/l/pynukez.svg)](https://github.com/ZlaylowZ/pynukez/blob/main/LICENSE)
 
 ```bash
-pip install pynukez[solana]        # Solana payments (SOL, USDC, USDT)
-pip install pynukez[evm]            # EVM payments (MON on Monad, WETH)
-pip install pynukez[all]            # Both
+pip install pynukez         # Core SDK (Solana Ed25519 envelope signing)
+pip install pynukez[evm]    # + secp256k1 envelope signing for EVM-paid lockers
 ```
 
 Requires Python 3.9+.
+
+## How it works
+
+1. `request_storage()` asks the gateway for a quote. You receive payment instructions — address, amount, asset, chain.
+2. **You execute the transfer yourself** — wallet, CLI, another tool, a hardware signer, whatever. pynukez does not touch your funds.
+3. `confirm_storage(pay_req_id, tx_sig=<your_tx_sig>)` closes the loop and returns a receipt.
+4. Use the receipt to provision a locker and upload / download / verify files.
+
+The SDK signs API envelopes (Ed25519 for Solana-paid lockers, secp256k1 for EVM-paid lockers) so the gateway can prove requests came from the locker's owner or an authorized operator. That's all the cryptography it does.
 
 ## 30-Second Example
 
@@ -21,19 +29,24 @@ from pynukez import Nukez
 
 client = Nukez(keypair_path="~/.config/solana/id.json")
 
-# Buy storage (3-step x402 payment flow)
+# 1. Ask for payment instructions
 request = client.request_storage(units=1)
-transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
-receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
+print(request.next_step)
+# -> "Transfer 0.001 SOL to <addr> on solana-devnet,
+#     then call confirm_storage(pay_req_id='...', tx_sig=<your_tx_signature>)"
 
-# Use it
+# 2. Execute the transfer yourself (wallet, CLI, etc.), capture the tx signature.
+tx_sig = "..."  # from your wallet / RPC / CLI
+
+# 3. Close the loop with the gateway
+receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
+
+# 4. Use the receipt
 client.provision_locker(receipt.id)
 urls = client.create_file(receipt.id, "notes.txt")
 client.upload_bytes(urls.upload_url, b"Hello!")
 data = client.download_bytes(urls.download_url)  # b"Hello!"
 ```
-
-**That's it.** Your agent now has permanent storage with a cryptographic receipt.
 
 ### Async version
 
@@ -42,62 +55,9 @@ from pynukez import AsyncNukez
 
 async with AsyncNukez(keypair_path="~/.config/solana/id.json") as client:
     request = await client.request_storage(units=1)
-    transfer = await client.solana_transfer(request.pay_to_address, request.amount_sol)
-    receipt = await client.confirm_storage(request.pay_req_id, transfer.signature)
+    # ... execute the transfer externally ...
+    receipt = await client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
     # ... same methods as sync, just awaited
-```
-
----
-
-## First Time? Start Here
-
-### 1. Get a Solana Wallet
-
-```bash
-# Install Solana CLI
-sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
-
-# Create wallet
-solana-keygen new --outfile ~/.config/solana/id.json
-```
-
-### 2. Get Test Money (Free)
-
-```bash
-solana config set --url devnet
-solana airdrop 2
-```
-
-### 3. Install PyNukez
-
-```bash
-pip install pynukez[solana]
-```
-
-### 4. Store Something
-
-```python
-from pynukez import Nukez
-
-client = Nukez(keypair_path="~/.config/solana/id.json")
-
-# Buy storage (costs ~0.001 SOL on devnet)
-request = client.request_storage()
-transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
-receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
-
-print(f"Your receipt: {receipt.id}")  # Save this!
-
-# Create your locker
-client.provision_locker(receipt.id)
-
-# Store a file
-urls = client.create_file(receipt.id, "my_file.txt")
-client.upload_bytes(urls.upload_url, b"My agent's data")
-
-# Read it back
-data = client.download_bytes(urls.download_url)
-print(data)  # b"My agent's data"
 ```
 
 ---
@@ -106,10 +66,8 @@ print(data)  # b"My agent's data"
 
 | What you want | Code |
 |--------------|------|
-| Buy storage | `request = client.request_storage(units=1)` |
-| Pay (Solana) | `transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)` |
-| Pay (EVM/Monad) | `transfer = client.evm_transfer(request.pay_to_address, request.amount_raw, pay_asset=request.pay_asset, token_address=request.token_address, network=request.network)` |
-| Get receipt | `receipt = client.confirm_storage(request.pay_req_id, transfer.signature)` |
+| Buy storage (quote) | `request = client.request_storage(units=1)` |
+| Confirm payment | `receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_sig>)` |
 | Setup locker | `client.provision_locker(receipt.id)` |
 | Store bytes | `urls = client.create_file(receipt.id, "file.txt")` then `client.upload_bytes(urls.upload_url, data)` |
 | Store file | `client.upload_file_path(receipt.id, "/path/to/file.pdf")` |
@@ -122,6 +80,8 @@ print(data)  # b"My agent's data"
 | Verify | `result = client.verify_storage(receipt.id)` |
 | Attest | `att = client.attest(receipt.id)` |
 | Merkle proof | `proof = client.get_merkle_proof(receipt.id, "file.txt")` |
+| Files manifest | `client.get_files_manifest(receipt.id)` |
+| Locker record | `client.get_locker_record(receipt.id)` |
 | Delegate | `client.add_operator(receipt.id, operator_pubkey)` |
 | Viewer link | `client.get_owner_viewer_url(receipt.id)` |
 
@@ -204,8 +164,7 @@ client = Nukez(keypair_path="~/.config/solana/id.json", network="mainnet-beta")
 
 | Problem | Fix |
 |---------|-----|
-| "Transaction not found" | Wait 3 seconds and retry `confirm_storage()` |
-| "Insufficient funds" | Run `solana airdrop 2` (devnet only) |
+| "Transaction not found" | The tx hasn't propagated yet. Wait a few seconds and retry `confirm_storage()` |
 | "URL expired" | Call `client.get_file_urls(receipt_id, filename)` for fresh URLs |
 | "File not found" | Check `client.list_files(receipt_id)` to see what exists |
 | `ReceiptStateNotBoundError` | Call `client.bind_receipt(receipt)` before the op (cross-session / fresh-client flows) |

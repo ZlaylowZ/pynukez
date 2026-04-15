@@ -24,10 +24,14 @@ def main():
     if args.receipt:
         receipt_id = args.receipt
     else:
-        print("Purchasing storage...")
+        print("Requesting storage quote...")
         request = client.request_storage(units=1)
-        transfer = client.solana_transfer(request.pay_to_address, request.amount_sol)
-        receipt = client.confirm_storage(request.pay_req_id, transfer.signature)
+        print(f"Pay {request.amount or request.amount_sol} {request.pay_asset} "
+              f"to {request.pay_to_address} on {request.network}")
+        # Execute the transfer externally (wallet, CLI, etc.) — pynukez
+        # does not move funds — then paste the tx signature below.
+        tx_sig = input("Paste tx signature once confirmed: ").strip()
+        receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
         receipt_id = receipt.id
         client.provision_locker(receipt_id)
         print(f"Save this receipt: {receipt_id}")
