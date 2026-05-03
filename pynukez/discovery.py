@@ -5,7 +5,7 @@ Provides functions for API discovery, health checking, and pricing.
 """
 
 import os
-import requests
+import httpx
 from typing import Dict, Any
 from .types import DiscoveryDoc, PriceInfo
 from .errors import NukezError
@@ -30,7 +30,7 @@ def discover(base_url: str = _DEFAULT_BASE_URL, timeout: float = 10.0) -> Discov
     
     try:
         # Get discovery document [14]
-        response = requests.get(f"{base_url}/.well-known/nukez.json", timeout=timeout)
+        response = httpx.get(f"{base_url}/.well-known/nukez.json", timeout=timeout)
         response.raise_for_status()
         data = response.json()
         
@@ -44,7 +44,7 @@ def discover(base_url: str = _DEFAULT_BASE_URL, timeout: float = 10.0) -> Discov
             status=data.get("status", "unknown")
         )
         
-    except requests.RequestException as e:
+    except httpx.HTTPError as e:
         raise NukezError(f"Discovery failed: {e}")
 
 def health_check(base_url: str = _DEFAULT_BASE_URL, timeout: float = 5.0) -> Dict[str, Any]:
@@ -62,7 +62,7 @@ def health_check(base_url: str = _DEFAULT_BASE_URL, timeout: float = 5.0) -> Dic
     
     try:
         # Use price endpoint as health check (public, no auth) [4]
-        response = requests.get(f"{base_url}/v1/price", timeout=timeout)
+        response = httpx.get(f"{base_url}/v1/price", timeout=timeout)
         
         if response.status_code == 200:
             data = response.json()
@@ -79,9 +79,9 @@ def health_check(base_url: str = _DEFAULT_BASE_URL, timeout: float = 5.0) -> Dic
                 "error": response.text[:200]
             }
             
-    except requests.Timeout:
+    except httpx.TimeoutException:
         return {"healthy": False, "error": "timeout"}
-    except requests.RequestException as e:
+    except httpx.HTTPError as e:
         return {"healthy": False, "error": str(e)}
 
 def get_current_price(base_url: str = _DEFAULT_BASE_URL, units: int = 1) -> PriceInfo:
@@ -101,7 +101,7 @@ def get_current_price(base_url: str = _DEFAULT_BASE_URL, units: int = 1) -> Pric
     base_url = base_url.rstrip('/')
     
     try:
-        response = requests.get(f"{base_url}/v1/price", params={"units": units})
+        response = httpx.get(f"{base_url}/v1/price", params={"units": units})
         response.raise_for_status()
         data = response.json()
         
@@ -114,5 +114,5 @@ def get_current_price(base_url: str = _DEFAULT_BASE_URL, units: int = 1) -> Pric
             network=data.get("network", "devnet")
         )
         
-    except requests.RequestException as e:
+    except httpx.HTTPError as e:
         raise NukezError(f"Failed to get pricing: {e}")
