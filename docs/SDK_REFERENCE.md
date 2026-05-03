@@ -79,7 +79,7 @@ tx_sig = "..."
 
 # Issue receipt object by confirming payment with the Nukez Gateway
 receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
-# SAVE receipt.id - you need it for everything!
+# Keep receipt.id as the primary SDK handle for this locker.
 
 # Provision storage locker instance via the receipt
 manifest = client.provision_locker(receipt.id)
@@ -209,7 +209,11 @@ The flow is always three explicit steps:
 2. **Pay** -- Complete the transfer with your own payment tool and capture the tx signature
 3. **Confirm** -- `confirm_storage()` presents `pay_req_id` + your tx signature, gateway verifies on-chain, returns receipt
 
-The receipt is the root credential. All subsequent operations require the `receipt_id`.
+The receipt ID is the primary SDK handle for follow-on operations. Persist it
+for ergonomic lookups and deterministic workflows. It is not a custody secret:
+because payment and attestation state are anchored to the payer/signing context,
+a lost local receipt handle can be recovered from the on-chain transaction trail
+for the relevant keypair.
 
 ### Methods
 
@@ -251,7 +255,7 @@ Confirm payment and get your receipt.
 
 ```python
 receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)
-receipt.id          # YOUR KEY TO EVERYTHING - save this!
+receipt.id          # Primary SDK handle for this locker
 receipt.locker_id   # Derived automatically
 ```
 
@@ -1154,7 +1158,7 @@ print(instructions["quickstart_flow"])
 
 ---
 
-## Going to Production
+## Selecting Devnet Or Mainnet
 
 ```python
 # Devnet (testing)

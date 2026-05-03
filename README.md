@@ -194,14 +194,18 @@ Important: if a valid `receipt_id` already exists, reuse it. Do not purchase sto
 
 ---
 
-## Important
+## Receipt Handles And Recovery
 
-**Save your `receipt.id`** — you need it for everything.
+Keep `receipt.id` as your primary SDK handle. It is the fastest way to
+provision, upload, list, verify, attest, and delegate against a locker. It is
+not the only trace of the transaction, though: because payment and attestation
+state are anchored to the payer/signing context, a lost local receipt handle can
+be recovered from the on-chain transaction trail for the relevant keypair.
 
 ```python
 # First time
 receipt = client.confirm_storage(...)
-print(receipt.id)  # Save this string somewhere!
+print(receipt.id)  # Persist this as the primary SDK handle.
 
 # Later — fresh process, reconstructed client:
 client.bind_receipt(receipt)          # or: bind_receipt(receipt_id=..., owner_identity=...)
@@ -217,9 +221,9 @@ instead.
 
 ---
 
-## Going to Production
+## Selecting Devnet Or Mainnet
 
-Change one line:
+Choose the target network explicitly when constructing the client:
 
 ```python
 # Devnet (testing)

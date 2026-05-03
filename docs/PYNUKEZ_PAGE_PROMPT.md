@@ -26,7 +26,7 @@ The page should match the existing design language while serving as both a marke
 **One-liner**: `Pay with SOL or MON. Store anything. Get a cryptographic receipt. Verify independently.`
 
 **Key stats row** (pill/badge components):
-- `v4.0.11`
+- `v4.0.12`
 - `Python 3.9+`
 - `MIT License`
 - `pip install pynukez`
@@ -78,7 +78,7 @@ tx_sig = "..."
 
 # Issue receipt object by confirming payment with the Nukez Gateway
 receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
-# SAVE receipt.id - you need it for everything!
+# Keep receipt.id as the primary SDK handle for this locker.
 
 # Provision storage locker instance via the receipt
 manifest = client.provision_locker(receipt.id)
@@ -139,7 +139,7 @@ A horizontal pipeline/flowchart component with 4 stages. Use the neon cyan accen
 **Stage 3: Confirm**
 - `client.confirm_storage(pay_req_id, tx_sig=<your_tx_signature>)`
 - Gateway verifies on-chain, returns cryptographic receipt
-- Receipt ID is the root credential for all operations
+- Receipt ID is the primary SDK handle. It should be persisted for ergonomic lookups, while on-chain payment history gives a recovery path if a local copy is lost.
 
 **Stage 4: Store & Verify**
 - `create_file`, `upload_bytes`, `download_bytes`
@@ -430,9 +430,9 @@ locker/file operations still require a signer source: `keypair_path`,
 
 ---
 
-### 16. Going to Production
+### 16. Selecting Devnet Or Mainnet
 
-A simple before/after:
+Choose the target network explicitly when constructing the client:
 
 ```python
 # Devnet (testing)
@@ -469,7 +469,7 @@ A compact FAQ/accordion component:
 
 ## Content Accuracy Notes
 
-These facts are verified against the source code (pynukez v4.0.11) and must be presented accurately:
+These facts are verified against the source code (pynukez v4.0.12) and must be presented accurately:
 
 1. **Python >= 3.9** (not 3.11+)
 2. **Core deps**: `httpx`, `pynacl`, `base58` (NOT pydantic, NOT python-dotenv, NOT requests)

@@ -118,7 +118,7 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "4.0.11"
+__version__ = "4.0.12"
 
 __all__ = [
     # Main client
@@ -256,8 +256,10 @@ def get_agent_instructions() -> dict:
         
         "important_note": (
             "Most file operations require receipt_id (not locker_id) because "
-            "signed envelope authentication uses the receipt. Always track the "
-            "receipt_id returned from confirm_storage()."
+            "signed envelope authentication uses the receipt. Keep the "
+            "receipt_id returned from confirm_storage() as the primary SDK "
+            "handle; if a local copy is lost, the on-chain transaction trail "
+            "for the relevant keypair provides a recovery path."
         ),
         "sandbox_note": (
             "In MCP/provider-hosted app sandboxes where local path handling or "
@@ -276,7 +278,7 @@ def get_agent_instructions() -> dict:
             },
             "payment": {
                 "request_storage": "Start x402 payment flow — returns payment instructions with payment_options. PyNukez does not execute transfers; use your own wallet, CLI, or signer.",
-                "confirm_storage": "Confirm payment and get receipt (SAVE receipt.id!). Takes the tx_sig from the transfer you completed with your own payment tool.",
+                "confirm_storage": "Confirm payment and get receipt. Keep receipt.id as the primary SDK handle; takes the tx_sig from the transfer you completed with your own payment tool.",
                 "get_provider_info": "Check provider capabilities and limits before selecting",
             },
             "storage": {
