@@ -26,13 +26,13 @@ The page should match the existing design language while serving as both a marke
 **One-liner**: `Pay with SOL or MON. Store anything. Get a cryptographic receipt. Verify independently.`
 
 **Key stats row** (pill/badge components):
-- `v3.2.0`
+- `v4.0.4`
 - `Python 3.9+`
 - `MIT License`
 - `pip install pynukez`
 
 **Primary CTA**: "Get Started" (scrolls to Quick Start)
-**Secondary CTA**: "GitHub" (links to https://github.com/ZlaylowZ/pynukez)
+**Secondary CTA**: "GitHub" (links to https://github.com/Nukez-xyz/pynukez)
 
 ---
 
@@ -118,6 +118,7 @@ A horizontal pipeline/flowchart component with 4 stages. Use the neon cyan accen
 
 **Stage 4: Store & Verify**
 - `create_file`, `upload_bytes`, `download_bytes`
+- `verify_receipt_hash` recomputes and compares the receipt object's canonical hash
 - `verify_storage` returns merkle root and attestation
 - Independent verification -- no trust required
 
@@ -176,6 +177,7 @@ A compact, scannable table showing the most common operations. Use a monospace c
 | Get data | `data = client.download_bytes(urls.download_url)` |
 | List files | `files = client.list_files(receipt.id)` |
 | Delete file | `client.delete_file(receipt.id, "old.txt")` |
+| Receipt hash | `check = client.verify_receipt_hash(receipt.id)` |
 | Verify | `v = client.verify_storage(receipt.id)` |
 | Attest | `att = client.attest(receipt.id)` |
 | Delegate | `client.add_operator(receipt.id, "pubkey")` |
@@ -289,7 +291,11 @@ client.confirm_file(receipt.id, "report.pdf")
 att = client.attest(receipt.id)
 print(att.merkle_root)  # "sha256:..."
 
-# 3. Verify independently (anyone can do this)
+# 3. Verify the receipt object's canonical hash
+check = client.verify_receipt_hash(receipt.id)
+assert check.matches == True
+
+# 4. Verify independently (anyone can do this)
 v = client.verify_storage(receipt.id)
 assert v.verified == True
 ```
@@ -426,13 +432,13 @@ A compact FAQ/accordion component:
 
 **Headline**: "Start building in 30 seconds"
 **Command**: `pip install pynukez` (with copy button)
-**Links row**: [GitHub](https://github.com/ZlaylowZ/pynukez) | [Full API Reference](docs/SDK_REFERENCE.md) | [Examples](https://github.com/ZlaylowZ/pynukez/tree/main/examples) | [PyPI](https://pypi.org/project/pynukez/)
+**Links row**: [GitHub](https://github.com/Nukez-xyz/pynukez) | [Full API Reference](docs/SDK_REFERENCE.md) | [Examples](https://github.com/Nukez-xyz/pynukez/tree/main/examples) | [PyPI](https://pypi.org/project/pynukez/)
 
 ---
 
 ## Content Accuracy Notes
 
-These facts are verified against the source code (pynukez v3.2.0) and must be presented accurately:
+These facts are verified against the source code (pynukez v4.0.4) and must be presented accurately:
 
 1. **Python >= 3.9** (not 3.11+)
 2. **Core deps**: `httpx`, `pynacl`, `base58` (NOT pydantic, NOT python-dotenv, NOT requests)

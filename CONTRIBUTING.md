@@ -3,7 +3,7 @@
 ## Setup
 
 ```bash
-git clone https://github.com/ZlaylowZ/pynukez.git
+git clone https://github.com/Nukez-xyz/pynukez.git
 cd pynukez
 pip install -e ".[dev]"
 ```
@@ -34,7 +34,7 @@ Line length is 100. Black and isort are both configured in `pyproject.toml`.
 2. Make your changes — keep them small and focused
 3. Add or update tests
 4. Run `pytest`, `black`, `isort`, and `mypy` before pushing
-5. Open a PR against `main` on https://github.com/ZlaylowZ/pynukez
+5. Open a PR against `main` on https://github.com/Nukez-xyz/pynukez
 
 ## Release Process
 

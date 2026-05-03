@@ -56,6 +56,7 @@ from .types import (
 
     # Utility types
     VerificationResult,
+    ReceiptHashVerification,
     PriceInfo,
     DiscoveryDoc,
 
@@ -117,7 +118,7 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "4.0.3"
+__version__ = "4.0.4"
 
 __all__ = [
     # Main client
@@ -142,6 +143,7 @@ __all__ = [
 
     # Data types - Utilities
     "VerificationResult",
+    "ReceiptHashVerification",
     "PriceInfo",
     "DiscoveryDoc",
 
@@ -310,6 +312,9 @@ def get_agent_instructions() -> dict:
                 "renderer_contract": "nukez.mcp.viewer_link@1.0 with ui.variant='nukez-neon'"
             },
             "verification": {
+                "get_receipt": "Fetch the canonical stored receipt document",
+                "verify_receipt_hash": "Recompute and compare the receipt object's canonical hash",
+                "receipt_hash_matches": "Boolean convenience helper for receipt hash checks",
                 "verify_storage": "Get cryptographic attestation — returns merkle_root, manifest_signature, att_code, per-file hashes",
                 "compute_hash": "Calculate SHA256 for local verification"
             },

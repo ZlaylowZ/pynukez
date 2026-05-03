@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pynukez"
-version = "4.0.3"
+version = "4.0.4"
 description = "Nukez SDK — agent-native storage with cryptographic verification"
 readme = "README.md"
 license = {text = "MIT"}
@@ -60,10 +60,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ZlaylowZ/pynukez"
+Homepage = "https://github.com/Nukez-xyz/pynukez"
 Documentation = "https://docs.nukez.xyz/sdk/python"
-Repository = "https://github.com/ZlaylowZ/pynukez"
-Issues = "https://github.com/ZlaylowZ/pynukez/issues"
+Repository = "https://github.com/Nukez-xyz/pynukez"
+Issues = "https://github.com/Nukez-xyz/pynukez/issues"
 
 [project.scripts]
 pynukez = "pynukez.cli:main"

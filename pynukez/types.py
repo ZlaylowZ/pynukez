@@ -164,6 +164,24 @@ class VerificationResult:
         return bool(self.merkle_root)
 
 @dataclass
+class ReceiptHashVerification:
+    """Receipt hash verification result."""
+    receipt_id: str
+    stored_hash: str
+    computed_hash: str
+    matches: bool
+    receipt: Dict[str, Any]
+    verification: Dict[str, Any]
+
+    @property
+    def ok(self) -> bool:
+        return self.matches
+
+    @property
+    def status(self) -> str:
+        return "verified" if self.matches else "hash_mismatch"
+
+@dataclass
 class PriceInfo:
     """Pricing information from get_price()."""
     units: int

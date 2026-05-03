@@ -65,10 +65,51 @@ class TestClientPublicMethods:
 
     @patch("pynukez.client.Keypair")
     def test_has_verify_methods(self, mock_kp):
-        """Client has verify_storage and get_merkle_proof."""
+        """Client has receipt, storage, and merkle verification helpers."""
         client = Nukez(keypair_path="~/.config/solana/id.json")
-        for method in ("verify_storage", "get_merkle_proof"):
+        for method in (
+            "get_receipt",
+            "verify_receipt_hash",
+            "receipt_hash_matches",
+            "verify_storage",
+            "get_merkle_proof",
+        ):
             assert hasattr(client, method), f"Missing method: {method}"
+
+    @patch("pynukez.client.Keypair")
+    def test_receipt_hash_helpers(self, mock_kp):
+        """Receipt hash helpers wrap the canonical receipt endpoints."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        client.http = MagicMock()
+        client.http.get.side_effect = [
+            {"id": "rid_123", "receipt_hash": "hash_abc"},
+            {"computed_hash": "hash_abc"},
+        ]
+
+        result = client.verify_receipt_hash("rid_123")
+
+        assert result.receipt_id == "rid_123"
+        assert result.stored_hash == "hash_abc"
+        assert result.computed_hash == "hash_abc"
+        assert result.matches is True
+        assert result.ok is True
+        assert result.status == "verified"
+        assert client.http.get.call_args_list == [
+            call("/v1/receipts/rid_123"),
+            call("/v1/receipts/rid_123/verify"),
+        ]
+
+    @patch("pynukez.client.Keypair")
+    def test_receipt_hash_matches_returns_bool(self, mock_kp):
+        """receipt_hash_matches returns a bool for concise guide examples."""
+        client = Nukez(keypair_path="~/.config/solana/id.json")
+        client.http = MagicMock()
+        client.http.get.side_effect = [
+            {"id": "rid_123", "receipt_hash": "hash_abc"},
+            {"computed_hash": "hash_def"},
+        ]
+
+        assert client.receipt_hash_matches("rid_123") is False
 
     @patch("pynukez.client.Keypair")
     def test_has_batch_methods(self, mock_kp):

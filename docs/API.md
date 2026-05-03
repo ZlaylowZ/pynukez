@@ -395,6 +395,20 @@ result = client.verify_storage(receipt.id)
 print(f"Verified: {result.verified}")
 ```
 
+### `verify_receipt_hash(receipt_id)`
+
+Recompute and compare the canonical receipt hash. This verifies the receipt
+object itself; use `verify_storage()` for storage/content attestation.
+
+```python
+check = client.verify_receipt_hash(receipt.id)
+print(f"stored:   {check.stored_hash}")
+print(f"computed: {check.computed_hash}")
+print(f"match:    {check.matches}")
+```
+
+Use `client.receipt_hash_matches(receipt.id)` when you only need a boolean.
+
 ### `compute_hash(data)`
 
 SHA256 hash for verifying data integrity.

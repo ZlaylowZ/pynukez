@@ -426,6 +426,9 @@ After uploading, confirm file hashes and generate a merkle attestation.
 | `confirm_file(receipt_id, filename)` | `ConfirmResult` | Compute and record content hash for one file |
 | `confirm_files(receipt_id, filenames)` | `BatchConfirmResult` | Batch hash confirmation |
 | `attest(receipt_id, sync=True)` | `AttestResult` | Compute merkle root and trigger attestation |
+| `get_receipt(receipt_id)` | `dict` | Fetch the canonical stored receipt document |
+| `verify_receipt_hash(receipt_id)` | `ReceiptHashVerification` | Recompute and compare the receipt object's canonical hash |
+| `receipt_hash_matches(receipt_id)` | `bool` | Convenience boolean for receipt hash checks |
 | `verify_storage(receipt_id)` | `VerificationResult` | Full verification: merkle root, manifest signature, per-file hashes |
 | `get_merkle_proof(receipt_id, filename)` | `dict` | Get inclusion proof for a specific file |
 | `compute_hash(data)` | `str` | SHA-256 hash for local verification |
@@ -447,8 +450,29 @@ print(att.merkle_root, att.file_count)
 v = client.verify_storage(receipt.id)
 print(v.verified, v.merkle_root, v.file_count)
 
+# Receipt object hash verification
+check = client.verify_receipt_hash(receipt.id)
+print(check.stored_hash)
+print(check.computed_hash)
+print(check.matches)
+
 # Per-file merkle proof
 proof = client.get_merkle_proof(receipt.id, "notes.txt")
+```
+
+### `verify_receipt_hash(receipt_id)`
+
+Recompute and compare the canonical receipt hash.
+
+This verifies the receipt object itself. Use `verify_storage()` for
+storage/content attestation, merkle roots, file hashes, and on-chain proof.
+
+```python
+check = client.verify_receipt_hash(receipt.id)
+
+print(f"stored:   {check.stored_hash}")
+print(f"computed: {check.computed_hash}")
+print(f"RECEIPT_HASH_MATCH: {'yes' if check.matches else 'no'}")
 ```
 
 ### Agent-to-Agent Verification
@@ -941,6 +965,18 @@ All types are plain Python `@dataclass` objects.
 | `status` | property | `"verified"` or `"unverified"` |
 | `attested` | property | True if merkle root present |
 
+**`ReceiptHashVerification`**
+| Field | Type | Description |
+|-------|------|-------------|
+| `receipt_id` | `str` | Receipt ID |
+| `stored_hash` | `str` | Receipt hash stored with the receipt |
+| `computed_hash` | `str` | Hash recomputed by the gateway |
+| `matches` | `bool` | True when stored and computed hashes match |
+| `receipt` | `dict` | Raw receipt document |
+| `verification` | `dict` | Raw verification response |
+| `ok` | property | Alias for `matches` |
+| `status` | property | `"verified"` or `"hash_mismatch"` |
+
 **`ConfirmResult`** -- `filename`, `content_hash` (`"sha256:..."`), `size_bytes`, `confirmed`
 
 **`BatchConfirmResult`** -- `results` (list), `confirmed_count`, `failed_count`
@@ -1049,6 +1085,7 @@ print(instructions["quickstart_flow"])
 | Get data | `data = client.download_bytes(urls.download_url)` |
 | List files | `files = client.list_files(receipt.id)` |
 | Delete file | `client.delete_file(receipt.id, "old.txt")` |
+| Receipt hash | `check = client.verify_receipt_hash(receipt.id)` |
 | Verify | `v = client.verify_storage(receipt.id)` |
 | Attest | `att = client.attest(receipt.id)` |
 | Delegate | `client.add_operator(receipt.id, "pubkey")` |

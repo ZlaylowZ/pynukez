@@ -35,6 +35,7 @@ from .types import (
     UploadResult,
     DeleteResult,
     VerificationResult,
+    ReceiptHashVerification,
     PriceInfo,
     ConfirmResult,
     BatchConfirmResult,
@@ -3173,6 +3174,50 @@ class Nukez:
     # =========================================================================
     # VERIFICATION
     # =========================================================================
+
+    def get_receipt(self, receipt_id: str) -> dict:
+        """
+        Fetch the canonical gateway receipt document.
+
+        This is the stored receipt object returned by the gateway after payment
+        confirmation. Use verify_receipt_hash() when you want the gateway to
+        recompute and compare the receipt's canonical hash.
+        """
+        return self.http.get(f"/v1/receipts/{receipt_id}")
+
+    def verify_receipt_hash(self, receipt_id: str) -> ReceiptHashVerification:
+        """
+        Recompute and compare a receipt's canonical hash.
+
+        This verifies the receipt object itself:
+        - stored_hash comes from /v1/receipts/{receipt_id}
+        - computed_hash comes from /v1/receipts/{receipt_id}/verify
+
+        For storage/content attestation, use verify_storage().
+        """
+        receipt = self.get_receipt(receipt_id)
+        verification = self.http.get(f"/v1/receipts/{receipt_id}/verify")
+
+        stored_hash = str(
+            receipt.get("receipt_hash")
+            or verification.get("receipt_hash")
+            or verification.get("stored_hash")
+            or ""
+        )
+        computed_hash = str(verification.get("computed_hash") or "")
+
+        return ReceiptHashVerification(
+            receipt_id=receipt_id,
+            stored_hash=stored_hash,
+            computed_hash=computed_hash,
+            matches=bool(stored_hash) and stored_hash == computed_hash,
+            receipt=receipt,
+            verification=verification,
+        )
+
+    def receipt_hash_matches(self, receipt_id: str) -> bool:
+        """Return True when the stored and recomputed receipt hashes match."""
+        return self.verify_receipt_hash(receipt_id).matches
     
     def verify_storage(self, receipt_id: str) -> VerificationResult:
         """
@@ -3697,7 +3742,6 @@ class Nukez:
             errors=errors,
             files=files_out,
         )
-
 
 
 

@@ -122,12 +122,13 @@ class TestEVMSigner:
             EVMSigner.from_file("/nonexistent/path.json")
 
     def test_from_file_no_private_key(self):
-        """from_file raises ValueError if no private_key in JSON."""
+        """from_file raises NukezError if no private_key in JSON."""
+        from pynukez.errors import NukezError
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump({"address": "0x1234"}, f)
             path = f.name
         try:
-            with pytest.raises(ValueError, match="No private_key"):
+            with pytest.raises(NukezError, match="No private_key"):
                 EVMSigner.from_file(path)
         finally:
             os.unlink(path)

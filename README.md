@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/pynukez.svg)](https://pypi.org/project/pynukez/)
 [![Python](https://img.shields.io/pypi/pyversions/pynukez.svg)](https://pypi.org/project/pynukez/)
-[![License](https://img.shields.io/pypi/l/pynukez.svg)](https://github.com/ZlaylowZ/pynukez/blob/main/LICENSE)
+[![License](https://img.shields.io/pypi/l/pynukez.svg)](https://github.com/Nukez-xyz/pynukez/blob/main/LICENSE)
 
 ```bash
 pip install pynukez
@@ -78,6 +78,7 @@ async with AsyncNukez(keypair_path="~/.config/solana/id.json") as client:
 | Get data | `data = client.download_bytes(urls.download_url)` |
 | List files | `files = client.list_files(receipt.id)` |
 | Delete file | `client.delete_file(receipt.id, "file.txt")` |
+| Receipt hash | `check = client.verify_receipt_hash(receipt.id)` |
 | Verify | `result = client.verify_storage(receipt.id)` |
 | Attest | `att = client.attest(receipt.id)` |
 | Merkle proof | `proof = client.get_merkle_proof(receipt.id, "file.txt")` |
@@ -178,7 +179,7 @@ client = Nukez(keypair_path="~/.config/solana/id.json", network="mainnet-beta")
 - [Full SDK Reference](./docs/SDK_REFERENCE.md) — Every method, type, and error documented
 - [Examples](./examples/) — Working code you can copy
 - [PyPI](https://pypi.org/project/pynukez/) — Published releases
-- [GitHub](https://github.com/ZlaylowZ/pynukez) — Source code, issues, releases
+- [GitHub](https://github.com/Nukez-xyz/pynukez) — Source code, issues, releases
 - [Contributing](./CONTRIBUTING.md) — Dev setup and PR workflow
 
 ---

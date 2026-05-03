@@ -57,7 +57,14 @@ class TestAsyncClientPublicMethods:
     @patch("pynukez._async_client.Keypair")
     def test_has_verify_methods(self, mock_kp):
         client = AsyncNukez(keypair_path="~/.config/solana/id.json")
-        for method in ("verify_storage", "get_merkle_proof", "attest"):
+        for method in (
+            "get_receipt",
+            "verify_receipt_hash",
+            "receipt_hash_matches",
+            "verify_storage",
+            "get_merkle_proof",
+            "attest",
+        ):
             assert hasattr(client, method), f"Missing {method}"
 
     @patch("pynukez._async_client.Keypair")
@@ -85,6 +92,33 @@ class TestAsyncClientPublicMethods:
 
 class TestAsyncClientFileOps:
     """Test async file operation methods with mocked HTTP."""
+
+    async def test_receipt_hash_helpers(self, async_client):
+        async_client.http.get = AsyncMock(side_effect=[
+            {"id": "rid_123", "receipt_hash": "hash_abc"},
+            {"computed_hash": "hash_abc"},
+        ])
+
+        result = await async_client.verify_receipt_hash("rid_123")
+
+        assert result.receipt_id == "rid_123"
+        assert result.stored_hash == "hash_abc"
+        assert result.computed_hash == "hash_abc"
+        assert result.matches is True
+        assert result.ok is True
+        assert result.status == "verified"
+        assert async_client.http.get.call_args_list == [
+            call("/v1/receipts/rid_123"),
+            call("/v1/receipts/rid_123/verify"),
+        ]
+
+    async def test_receipt_hash_matches_returns_bool(self, async_client):
+        async_client.http.get = AsyncMock(side_effect=[
+            {"id": "rid_123", "receipt_hash": "hash_abc"},
+            {"computed_hash": "hash_def"},
+        ])
+
+        assert await async_client.receipt_hash_matches("rid_123") is False
 
     async def test_get_price(self, async_client):
         async_client.http.get = AsyncMock(return_value={

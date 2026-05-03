@@ -6,7 +6,7 @@ Tests all dataclasses, including expanded FileInfo fields (Phase 2).
 """
 import pytest
 from pynukez.types import (
-    StorageRequest, Receipt, FileUrls, VerificationResult,
+    StorageRequest, Receipt, FileUrls, VerificationResult, ReceiptHashVerification,
     PriceInfo, PaymentOption, NukezManifest,
     FileInfo, ViewerLink, FileViewerInfo, ViewerFileList,
     UploadResult, DeleteResult, ConfirmResult,
@@ -117,6 +117,36 @@ class TestVerificationResult:
             receipt_id="r1", verified=False, result_hash="abc",
         )
         assert vr.verified is False
+
+
+class TestReceiptHashVerification:
+    """ReceiptHashVerification dataclass tests."""
+
+    def test_match_status(self):
+        result = ReceiptHashVerification(
+            receipt_id="r1",
+            stored_hash="abc",
+            computed_hash="abc",
+            matches=True,
+            receipt={"receipt_hash": "abc"},
+            verification={"computed_hash": "abc"},
+        )
+
+        assert result.ok is True
+        assert result.status == "verified"
+
+    def test_mismatch_status(self):
+        result = ReceiptHashVerification(
+            receipt_id="r1",
+            stored_hash="abc",
+            computed_hash="def",
+            matches=False,
+            receipt={"receipt_hash": "abc"},
+            verification={"computed_hash": "def"},
+        )
+
+        assert result.ok is False
+        assert result.status == "hash_mismatch"
 
 
 class TestConfirmResult:

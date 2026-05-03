@@ -44,6 +44,7 @@ from .types import (
     UploadResult,
     DeleteResult,
     VerificationResult,
+    ReceiptHashVerification,
     PriceInfo,
     ConfirmResult,
     BatchConfirmResult,
@@ -2117,6 +2118,47 @@ class AsyncNukez:
     # ------------------------------------------------------------------
     # VERIFICATION & ATTESTATION
     # ------------------------------------------------------------------
+
+    async def get_receipt(self, receipt_id: str) -> dict:
+        """
+        Fetch the canonical gateway receipt document.
+
+        This is the stored receipt object returned by the gateway after payment
+        confirmation. Use verify_receipt_hash() when you want the gateway to
+        recompute and compare the receipt's canonical hash.
+        """
+        return await self.http.get(f"/v1/receipts/{receipt_id}")
+
+    async def verify_receipt_hash(self, receipt_id: str) -> ReceiptHashVerification:
+        """
+        Recompute and compare a receipt's canonical hash.
+
+        This verifies the receipt object itself. For storage/content
+        attestation, use verify_storage().
+        """
+        receipt = await self.get_receipt(receipt_id)
+        verification = await self.http.get(f"/v1/receipts/{receipt_id}/verify")
+
+        stored_hash = str(
+            receipt.get("receipt_hash")
+            or verification.get("receipt_hash")
+            or verification.get("stored_hash")
+            or ""
+        )
+        computed_hash = str(verification.get("computed_hash") or "")
+
+        return ReceiptHashVerification(
+            receipt_id=receipt_id,
+            stored_hash=stored_hash,
+            computed_hash=computed_hash,
+            matches=bool(stored_hash) and stored_hash == computed_hash,
+            receipt=receipt,
+            verification=verification,
+        )
+
+    async def receipt_hash_matches(self, receipt_id: str) -> bool:
+        """Return True when the stored and recomputed receipt hashes match."""
+        return (await self.verify_receipt_hash(receipt_id)).matches
 
     async def verify_storage(self, receipt_id: str) -> VerificationResult:
         """Verify storage integrity and get cryptographic attestation."""
