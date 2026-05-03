@@ -26,7 +26,7 @@ The page should match the existing design language while serving as both a marke
 **One-liner**: `Pay with SOL or MON. Store anything. Get a cryptographic receipt. Verify independently.`
 
 **Key stats row** (pill/badge components):
-- `v4.0.8`
+- `v4.0.9`
 - `Python 3.9+`
 - `MIT License`
 - `pip install pynukez`
@@ -82,8 +82,8 @@ receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
 # Provision storage locker instance via the receipt
 manifest = client.provision_locker(receipt.id)
 
-# Upload an actual local file by path
-#    PyNukez reads bytes from disk; file contents do not pass through prompt context.
+# Upload file. File contents do not pass through agent context window.
+# Tremendous advantage over ordinary flows.
 local_file = Path("~/Documents/report.pdf").expanduser()
 uploaded = client.upload_file_path(
     receipt.id,
@@ -91,7 +91,7 @@ uploaded = client.upload_file_path(
     content_type="application/pdf",
 )
 
-# 7. Fetch fresh signed URLs when you want to read it back
+# How to read stored content back
 urls = client.get_file_urls(receipt.id, uploaded["filename"])
 
 # 8. Download data
@@ -453,7 +453,7 @@ A compact FAQ/accordion component:
 
 ## Content Accuracy Notes
 
-These facts are verified against the source code (pynukez v4.0.8) and must be presented accurately:
+These facts are verified against the source code (pynukez v4.0.9) and must be presented accurately:
 
 1. **Python >= 3.9** (not 3.11+)
 2. **Core deps**: `httpx`, `pynacl`, `base58` (NOT pydantic, NOT python-dotenv, NOT requests)

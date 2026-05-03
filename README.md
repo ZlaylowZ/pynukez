@@ -58,8 +58,8 @@ receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
 # Provision storage locker instance via the receipt
 client.provision_locker(receipt.id)
 
-# Upload an actual local file by path. PyNukez reads bytes from disk;
-# the file contents do not need to pass through your prompt or notebook.
+# Upload file. File contents do not pass through agent context window.
+# Tremendous advantage over ordinary flows.
 local_file = Path("~/Documents/report.pdf").expanduser()
 uploaded = client.upload_file_path(
     receipt.id,
@@ -67,7 +67,7 @@ uploaded = client.upload_file_path(
     content_type="application/pdf",
 )
 
-# Fetch fresh URLs when you want to read it back.
+# How to read stored content back
 urls = client.get_file_urls(receipt.id, uploaded["filename"])
 data = client.download_bytes(urls.download_url)
 ```
