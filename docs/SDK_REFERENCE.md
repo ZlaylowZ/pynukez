@@ -421,19 +421,34 @@ for f in batch.files:
 
 ### Sandbox Ingest
 
-For proxied runtimes where signed-URL uploads are blocked (e.g., `/mnt/data` restrictions):
+Sandbox helpers are advanced fallback methods for MCP/provider-hosted runtimes
+where local path handling or direct signed-URL uploads are restricted. Most
+Python users should use `upload_file_path()`, `bulk_upload_paths()`, or
+`upload_directory()` first.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `sandbox_create_ingest_job(receipt_id, files, execution_mode=None)` | `dict` | Create chunked ingest job |
-| `sandbox_append_ingest_part(receipt_id, job_id, part_number, data)` | `dict` | Append base64 chunk |
-| `sandbox_complete_ingest_job(receipt_id, job_id)` | `dict` | Finalize and commit files |
 | `sandbox_upload_bytes(receipt_id, filename, data, ...)` | `dict` | Convenience: bytes -> chunked ingest |
 | `sandbox_upload_base64(receipt_id, filename, base64_data, ...)` | `dict` | Convenience: base64 -> chunked ingest |
 | `sandbox_upload_file_path(receipt_id, filepath, filename=None, ...)` | `dict` | Convenience: local file -> chunked ingest |
+| `sandbox_create_ingest_job(receipt_id, files, execution_mode=None)` | `dict` | Low-level: create manual chunked ingest job |
+| `sandbox_append_ingest_part(receipt_id, job_id, file_id, part_no, payload_b64, is_last=False)` | `dict` | Low-level: append one base64 chunk |
+| `sandbox_complete_ingest_job(receipt_id, job_id, file_ids=None)` | `dict` | Low-level: finalize and commit files |
 
 ```python
-# Full control
+# Recommended constrained-runtime helper
+result = client.sandbox_upload_file_path(
+    receipt.id,
+    "/Users/alice/Downloads/image.png",
+    filename="image.png",
+    content_type="image/png",
+)
+
+# Notebook-safe readback: write bytes to disk instead of printing them
+file_urls = client.get_file_urls(receipt.id, "image.png")
+client.download_to_file(file_urls.download_url, "~/Downloads/image_roundtrip.png")
+
+# Manual chunk control
 job = client.sandbox_create_ingest_job(
     receipt_id=receipt.id,
     files=[{"filename": "image.png", "content_type": "image/png"}],
@@ -441,14 +456,12 @@ job = client.sandbox_create_ingest_job(
 client.sandbox_append_ingest_part(
     receipt_id=receipt.id,
     job_id=job["job_id"],
-    part_number=0,
-    data=chunk_bytes,
+    file_id=job["files"][0]["file_id"],
+    part_no=0,
+    payload_b64="<chunk-0-base64>",
+    is_last=True,
 )
 result = client.sandbox_complete_ingest_job(receipt.id, job["job_id"])
-
-# Or use convenience helpers
-result = client.sandbox_upload_bytes(receipt.id, "file.txt", b"data")
-result = client.sandbox_upload_file_path(receipt.id, "/path/to/file.pdf")
 ```
 
 ---

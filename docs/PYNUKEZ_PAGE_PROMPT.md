@@ -26,7 +26,7 @@ The page should match the existing design language while serving as both a marke
 **One-liner**: `Pay with SOL or MON. Store anything. Get a cryptographic receipt. Verify independently.`
 
 **Key stats row** (pill/badge components):
-- `v4.0.10`
+- `v4.0.11`
 - `Python 3.9+`
 - `MIT License`
 - `pip install pynukez`
@@ -221,9 +221,10 @@ Developers need to quickly understand which upload method to use. A comparison c
 | `upload_file_path()` | Single local file | No -- reads from disk directly |
 | `bulk_upload_paths()` | Multiple local files | No -- parallel, batch confirm |
 | `upload_directory()` | Whole directories | No -- glob filtering, recursive |
-| `sandbox_upload_bytes()` | Sandboxed runtimes | Chunked -- for restricted environments |
 
 Callout: "For LLM/agent workflows, prefer path-based uploads (`upload_file_path`, `bulk_upload_paths`) to avoid sending file content through the context window."
+
+Secondary callout: "Advanced constrained-runtime fallback: PyNukez also exposes `sandbox_upload_*` helpers for MCP/provider-hosted runtimes where local path handling or direct signed-URL uploads are restricted. Most Python users should start with the methods above."
 
 ---
 
@@ -468,7 +469,7 @@ A compact FAQ/accordion component:
 
 ## Content Accuracy Notes
 
-These facts are verified against the source code (pynukez v4.0.10) and must be presented accurately:
+These facts are verified against the source code (pynukez v4.0.11) and must be presented accurately:
 
 1. **Python >= 3.9** (not 3.11+)
 2. **Core deps**: `httpx`, `pynacl`, `base58` (NOT pydantic, NOT python-dotenv, NOT requests)

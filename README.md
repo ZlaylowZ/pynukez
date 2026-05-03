@@ -131,9 +131,38 @@ async with AsyncNukez(
 
 ## Sandboxed App Uploads
 
-If your agent runs in a proxied app sandbox (for example, `/mnt/data` path restrictions), path uploads can fail even when locker auth is valid.
+Most Python users should start with `upload_file_path()`, `bulk_upload_paths()`,
+or `upload_directory()`. The `sandbox_upload_*` helpers are advanced fallback
+methods for MCP/provider-hosted runtimes where local path handling or direct
+signed-URL uploads are restricted.
 
-Use the sandbox ingest flow instead:
+Use the convenience helpers first:
+
+```python
+from pathlib import Path
+
+result = client.sandbox_upload_file_path(
+    receipt.id,
+    "/Users/alice/Downloads/image.png",
+    filename="image.png",
+    content_type="image/png",
+)
+
+print(result["status"])
+print(result["file"]["content_hash"])
+```
+
+In notebooks, do not print large raw byte strings. Write downloads to disk or
+stream them directly:
+
+```python
+file_urls = client.get_file_urls(receipt.id, "image.png")
+
+out = Path("~/Downloads/image_roundtrip.png").expanduser()
+client.download_to_file(file_urls.download_url, out)
+```
+
+For manual base64 chunk control, use the lower-level job API:
 
 ```python
 job = client.sandbox_create_ingest_job(

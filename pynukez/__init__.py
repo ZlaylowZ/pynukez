@@ -118,7 +118,7 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "4.0.10"
+__version__ = "4.0.11"
 
 __all__ = [
     # Main client
@@ -260,10 +260,12 @@ def get_agent_instructions() -> dict:
             "receipt_id returned from confirm_storage()."
         ),
         "sandbox_note": (
-            "In proxied app sandboxes where file-path uploads are blocked, use "
-            "sandbox_create_ingest_job -> sandbox_append_ingest_part -> "
-            "sandbox_complete_ingest_job. Reuse existing receipt_id; do not "
-            "purchase new storage unless explicitly requested."
+            "In MCP/provider-hosted app sandboxes where local path handling or "
+            "direct signed-URL uploads are restricted, prefer "
+            "sandbox_upload_file_path(), sandbox_upload_bytes(), or "
+            "sandbox_upload_base64(). The create/append/complete job methods "
+            "are low-level manual chunk controls. Reuse existing receipt_id; "
+            "do not purchase new storage unless explicitly requested."
         ),
         
         "core_operations": {
@@ -288,12 +290,12 @@ def get_agent_instructions() -> dict:
                 "upload_directory": "Upload an entire directory (pattern/recursive aware)",
                 "start_bulk_upload_job": "Start non-blocking background bulk upload; returns job_id immediately (best for long-running uploads)",
                 "get_upload_job": "Poll background upload job state by job_id",
-                "sandbox_create_ingest_job": "Create sandbox chunk-ingest job (for app runtimes where file paths are blocked)",
-                "sandbox_append_ingest_part": "Append one base64 chunk to sandbox ingest job",
-                "sandbox_complete_ingest_job": "Finalize sandbox ingest job and commit files",
-                "sandbox_upload_bytes": "Chunked bytes convenience uploader for sandbox runtimes",
-                "sandbox_upload_base64": "Decode base64 then chunk-upload through sandbox ingest",
-                "sandbox_upload_file_path": "Read local file then upload through sandbox ingest flow",
+                "sandbox_upload_file_path": "Advanced fallback: read local file then upload through sandbox ingest flow",
+                "sandbox_upload_bytes": "Advanced fallback: chunked bytes uploader for constrained runtimes",
+                "sandbox_upload_base64": "Advanced fallback: decode base64 then chunk-upload through sandbox ingest",
+                "sandbox_create_ingest_job": "Low-level manual chunk control: create sandbox chunk-ingest job",
+                "sandbox_append_ingest_part": "Low-level manual chunk control: append one base64 chunk",
+                "sandbox_complete_ingest_job": "Low-level manual chunk control: finalize sandbox ingest job",
                 "download_bytes": "Download data from signed URL",
                 "list_files": "List all files in locker",
                 "get_file_urls": "Get fresh URLs for existing file",
