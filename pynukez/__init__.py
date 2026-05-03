@@ -118,7 +118,7 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "4.0.5"
+__version__ = "4.0.6"
 
 __all__ = [
     # Main client

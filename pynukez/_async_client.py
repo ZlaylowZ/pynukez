@@ -612,7 +612,7 @@ class AsyncNukez:
                     request.pay_asset = opt["pay_asset"]
                     raw_net = opt.get("network", "")
                     request.network = caip2_to_friendly(raw_net, pay_network)
-                    request.amount = opt.get("amount")
+                    request.amount = opt.get("human_amount") or opt.get("amount")
                     request.amount_raw = int(opt["amount"]) if opt.get("amount") else None
                     request.token_address = opt.get("asset_contract") if opt.get("asset_contract") not in (None, "native") else None
                     request.token_decimals = opt.get("decimals")
@@ -621,6 +621,7 @@ class AsyncNukez:
                             request.amount_sol = float(opt["human_amount"])
                         except (ValueError, TypeError):
                             pass
+                    request.__post_init__()
                     break
 
             return request

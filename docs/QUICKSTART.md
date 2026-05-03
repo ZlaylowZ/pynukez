@@ -2,11 +2,14 @@
 
 You need two things:
 1. Python 3.9+
-2. A keypair you use to sign envelopes on the locker owner side.
+2. A way to sign owner/operator envelopes. For local scripts, the constructor
+   can optionally read a key file:
    - **Solana-paid lockers**: an Ed25519 keypair JSON (e.g. a file produced by
      `solana-keygen new`).
    - **EVM-paid lockers**: an EVM private key JSON
      (`{"address": "0x...", "private_key": "0x..."}`).
+   You can also provide another signer bridge instead. Nukez does not custody,
+   receive, or store client keypair material.
 
 pynukez does NOT move funds. You execute payments out-of-band (wallet,
 CLI, hardware signer, etc.) and hand us the resulting tx signature.
@@ -19,9 +22,10 @@ pip install pynukez
 
 That's it. Envelope signing for both Solana-paid and EVM-paid lockers is in the base install.
 
-## Step 2: Provide a keypair
+## Step 2: Choose a signer
 
-Any Ed25519 keypair in the Solana JSON format works. If you don't have one:
+For local Ed25519 envelope signing, any Solana JSON keypair works. If you want
+to create one with the Solana CLI:
 
 ```bash
 # Optional — only if you want to use solana-keygen to produce a key file
@@ -29,15 +33,18 @@ sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
 solana-keygen new
 ```
 
-The resulting file at `~/.config/solana/id.json` is what `keypair_path`
-expects.
+The resulting file at `~/.config/solana/id.json` is what optional
+`keypair_path` expects. If your app uses a relay, wallet bridge, HSM, or custom
+signer, use that instead.
 
 ## Step 3: Test It
 
 ```python
 from pynukez import Nukez
 
-client = Nukez(keypair_path="~/.config/solana/id.json")
+client = Nukez(
+    keypair_path="~/.config/solana/id.json",  # optional local signer path
+)
 
 # Check price (no payment or on-chain activity)
 price = client.get_price()

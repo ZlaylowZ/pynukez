@@ -8,11 +8,16 @@ The main client. Initialize once, use everywhere.
 from pynukez import Nukez
 
 client = Nukez(
-    keypair_path="~/.config/solana/id.json",  # Required
+    keypair_path="~/.config/solana/id.json",  # Optional local signer path
     network="devnet",                          # or "mainnet-beta"
     base_url="https://api.nukez.xyz"        # Optional
 )
 ```
+
+`keypair_path` is not required. It is a convenience for local scripts and
+agents that want PyNukez to sign gateway envelopes from a key file. You can use
+another signer implementation instead, and Nukez does not custody, receive, or
+store client keypair material.
 
 ---
 

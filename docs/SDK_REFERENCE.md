@@ -57,7 +57,9 @@ Requires Python 3.9+. Supported on macOS, Linux, and Windows.
 ```python
 from pynukez import Nukez
 
-client = Nukez(keypair_path="~/.config/solana/id.json")
+client = Nukez(
+    keypair_path="~/.config/solana/id.json",  # optional local signer path
+)
 
 # 1. Check pricing
 price = client.get_price()
@@ -98,7 +100,9 @@ data = client.download_bytes(urls.download_url)
 ```python
 from pynukez import AsyncNukez
 
-async with AsyncNukez(keypair_path="~/.config/solana/id.json") as client:
+async with AsyncNukez(
+    keypair_path="~/.config/solana/id.json",  # optional local signer path
+) as client:
     price = await client.get_price()
     request = await client.request_storage(units=1)
     # ... execute the transfer externally, capture tx_sig ...
@@ -140,24 +144,29 @@ client = Nukez(signing_key=my_custom_signer)
 
 ### Constructor Parameters
 
+`keypair_path` is optional. It is wired in for local scripts and agents that
+want PyNukez to sign gateway envelopes from a Solana CLI keypair file. You can
+instead pass an explicit `signing_key` or use another signer bridge. Nukez does
+not custody, receive, or store client keypair material.
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `keypair_path` | `str \| Path` | `None` | Path to Ed25519 keypair JSON used to sign envelopes for Solana-paid lockers |
+| `keypair_path` | `str \| Path` | `None` | Optional path to a local Ed25519 keypair JSON used to sign envelopes |
 | `base_url` | `str` | `NUKEZ_BASE_URL` env or `https://api.nukez.xyz` | Gateway API URL |
 | `network` | `str` | `"devnet"` | Network target |
 | `timeout` | `int` | `None` | HTTP request timeout (seconds) |
-| `evm_private_key_path` | `str \| Path` | `None` | Path to EVM private key used for secp256k1 envelope signing |
+| `evm_private_key_path` | `str \| Path` | `None` | Optional path to a local EVM private key used for secp256k1 envelope signing |
 | `evm_rpc_url` | `str` | `None` | Reserved; currently unused at the SDK layer |
 | `signing_key` | `Signer` | `None` | Explicit Signer instance (overrides keypair) |
 
 Both clients support context managers:
 
 ```python
-with Nukez(keypair_path="~/.config/solana/id.json") as client:
+with Nukez(keypair_path="~/.config/solana/id.json") as client:  # keypair_path is optional
     ...
 
 # or
-client = Nukez(keypair_path="~/.config/solana/id.json")
+client = Nukez(keypair_path="~/.config/solana/id.json")  # keypair_path is optional
 try:
     ...
 finally:
@@ -200,7 +209,7 @@ request.next_step        # Human-readable guidance for the agent
 |-----------|------|---------|-------------|
 | `units` | `int` | `1` | Number of storage units |
 | `provider` | `str` | `None` | Storage backend: `"gcs"`, `"mongodb"`, `"storj"` |
-| `pay_network` | `str` | `None` | Payment chain: `"solana-devnet"`, `"monad-testnet"` |
+| `pay_network` | `str` | `None` | Payment chain: friendly names such as `"solana-mainnet"` / `"monad-mainnet"` or CAIP-2 values such as `"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"` / `"eip155:143"` |
 | `pay_asset` | `str` | `None` | Payment token: `"SOL"`, `"MON"`, `"USDC"`, `"USDT"`, `"WETH"` |
 
 #### Executing the payment
@@ -239,6 +248,9 @@ receipt.locker_id   # Derived automatically
 | Solana | SOL | Ed25519 |
 | Solana | USDC | Ed25519 |
 | Solana | USDT | Ed25519 |
+| Solana | WETH | Ed25519 |
+| Monad (EVM) | USDC | secp256k1 |
+| Monad (EVM) | USDT0 | secp256k1 |
 | Monad (EVM) | MON | secp256k1 |
 | Monad (EVM) | WETH | secp256k1 |
 

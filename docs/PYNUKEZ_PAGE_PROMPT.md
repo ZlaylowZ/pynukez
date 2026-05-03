@@ -26,7 +26,7 @@ The page should match the existing design language while serving as both a marke
 **One-liner**: `Pay with SOL or MON. Store anything. Get a cryptographic receipt. Verify independently.`
 
 **Key stats row** (pill/badge components):
-- `v4.0.5`
+- `v4.0.6`
 - `Python 3.9+`
 - `MIT License`
 - `pip install pynukez`
@@ -58,7 +58,9 @@ A full-width, syntax-highlighted code card showing the 8-step flow. This is the 
 ```python
 from pynukez import Nukez
 
-client = Nukez(keypair_path="~/.config/solana/id.json")
+client = Nukez(
+    keypair_path="~/.config/solana/id.json",  # optional local signer path
+)
 
 # 1. Check pricing
 price = client.get_price()
@@ -210,7 +212,7 @@ Side-by-side code comparison (two-column layout or toggle):
 ```python
 from pynukez import Nukez
 
-with Nukez(keypair_path="key.json") as client:
+with Nukez(keypair_path="key.json") as client:  # keypair_path is optional
     files = client.list_files(receipt_id)
 ```
 
@@ -218,7 +220,7 @@ with Nukez(keypair_path="key.json") as client:
 ```python
 from pynukez import AsyncNukez
 
-async with AsyncNukez(keypair_path="key.json") as client:
+async with AsyncNukez(keypair_path="key.json") as client:  # keypair_path is optional
     files = await client.list_files(receipt_id)
 ```
 
@@ -390,7 +392,7 @@ Constructor parameter table:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `keypair_path` | -- | Ed25519 keypair JSON for Solana-paid lockers |
+| `keypair_path` | -- | Optional local Ed25519 keypair JSON for envelope signing |
 | `base_url` | `https://api.nukez.xyz` | Gateway API URL |
 | `network` | `"devnet"` | `"devnet"` or `"mainnet-beta"` |
 | `evm_private_key_path` | -- | EVM private key for secp256k1 envelope signing |
@@ -438,7 +440,7 @@ A compact FAQ/accordion component:
 
 ## Content Accuracy Notes
 
-These facts are verified against the source code (pynukez v4.0.5) and must be presented accurately:
+These facts are verified against the source code (pynukez v4.0.6) and must be presented accurately:
 
 1. **Python >= 3.9** (not 3.11+)
 2. **Core deps**: `httpx`, `pynacl`, `base58` (NOT pydantic, NOT python-dotenv, NOT requests)

@@ -10,7 +10,7 @@
 pip install pynukez
 ```
 
-One command, one install target. Envelope signing works for both Solana-paid (Ed25519) and EVM-paid (secp256k1) lockers out of the box — no extras knob to get wrong.
+Native support for both Solana and Monad blockchains. Thus, this includes support for Ed25519 and secp256k1 keypairs. The entire PyNukez library is designed and built for direct integration with agentic systems. The landmark agentic storage protocol is optimized for use by autonomous agents. Compatible with any model provider, agentic platform, or other integrations.
 
 Requires Python 3.9+.
 
@@ -21,17 +21,27 @@ Requires Python 3.9+.
 3. `confirm_storage(pay_req_id, tx_sig=<your_tx_sig>)` closes the loop and returns a receipt.
 4. Use the receipt to provision a locker and upload / download / verify files.
 
-The SDK signs API envelopes (Ed25519 for Solana-paid lockers, secp256k1 for EVM-paid lockers) so the gateway can prove requests came from the locker's owner or an authorized operator. That's all the cryptography it does.
+The PyNukez SDK does not support cryptographic payment transfers. This is a conscious design decision to encourage prudent keypair management and security. Please visit https://nukez.xyz/docs/pynukez/helpers for examples and external helpers to facilitate cryptographic operations for agentic workflows.
 
 ## 30-Second Example
 
 ```python
 from pynukez import Nukez
 
-client = Nukez(keypair_path="~/.config/solana/id.json")
+# Instantiate an instance of the Nukez class.
+# keypair_path is optional. When set, PyNukez uses this local keypair only
+# to sign gateway envelopes for protected locker/file calls; PyNukez does
+# not use it to execute cryptographic payment transfers.
+client = Nukez(
+    keypair_path="~/.config/solana/id.json",  # optional local signer path
+)
 
-# 1. Ask for payment instructions
-request = client.request_storage(units=1)
+# Request the x402 payment instructions from the Nukez gateway.
+# Pass the preferred storage provider and quantity of storage units.
+# If no storage provider is set, PyNukez defaults to "gcs".
+request = client.request_storage(units=1, provider="gcs")
+
+# Print details for next step
 print(request.next_step)
 # -> "Transfer 0.001 SOL to <addr> on solana-devnet,
 #     then call confirm_storage(pay_req_id='...', tx_sig=<your_tx_signature>)"
@@ -54,7 +64,9 @@ data = client.download_bytes(urls.download_url)  # b"Hello!"
 ```python
 from pynukez import AsyncNukez
 
-async with AsyncNukez(keypair_path="~/.config/solana/id.json") as client:
+async with AsyncNukez(
+    keypair_path="~/.config/solana/id.json",  # optional local signer path
+) as client:
     request = await client.request_storage(units=1)
     # ... execute the transfer externally ...
     receipt = await client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)

@@ -6,6 +6,7 @@ Agents can access fields predictably: result.field_name
 """
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import List, Optional, Dict, Any, Tuple
 import hashlib
 
@@ -14,7 +15,8 @@ class StorageRequest:
     """Payment instructions from request_storage().
 
     Multi-chain support:
-      - Solana: amount_sol / amount_lamports are populated, pay_asset="SOL"
+      - Solana SOL: amount_sol / amount_lamports are populated, pay_asset="SOL"
+      - Solana SPL: amount / amount_raw / token_address / token_decimals populated
       - EVM/Monad: amount / amount_raw / token_address / token_decimals populated
     """
     pay_req_id: str
@@ -57,12 +59,29 @@ class StorageRequest:
                 f"confirm_storage(pay_req_id='{self.pay_req_id}', "
                 f"tx_sig=<your_tx_signature>)"
             )
-        else:
+        elif (self.pay_asset or "").upper() == "SOL":
             self.next_step = (
                 f"Transfer {self.amount_sol} SOL "
                 f"to {self.pay_to_address} on {self.network}, then call "
                 f"confirm_storage(pay_req_id='{self.pay_req_id}', "
                 f"tx_sig=<your_tx_signature>)"
+            )
+        else:
+            display_amount = self.amount or self.amount_raw or "?"
+            if self.amount_raw is not None and self.token_decimals is not None:
+                try:
+                    q = Decimal(int(self.amount_raw)) / (Decimal(10) ** int(self.token_decimals))
+                    display_amount = format(q, "f")
+                    if "." in display_amount:
+                        display_amount = display_amount.rstrip("0").rstrip(".") or "0"
+                except Exception:
+                    pass
+            self.next_step = (
+                f"Transfer {display_amount} {self.pay_asset} "
+                f"to {self.pay_to_address} on {self.network}, then call "
+                f"confirm_storage(pay_req_id='{self.pay_req_id}', "
+                f"tx_sig=<your_tx_signature>, payment_chain='{self.network}', "
+                f"payment_asset='{self.pay_asset}')"
             )
         if self.payment_options:
             self.next_step += (
