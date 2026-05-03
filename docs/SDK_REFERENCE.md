@@ -55,6 +55,7 @@ Requires Python 3.9+. Supported on macOS, Linux, and Windows.
 ## Quick Start
 
 ```python
+import webbrowser
 from pathlib import Path
 from pynukez import Nukez
 
@@ -92,11 +93,25 @@ uploaded = client.upload_file_path(
     content_type="application/pdf",
 )
 
+# Large or long-running upload option:
+# job = client.start_bulk_upload_job(
+#     receipt.id,
+#     sources=[{"filepath": str(local_file), "content_type": "application/pdf"}],
+#     workers=1,
+# )
+# status = client.get_upload_job(job["job_id"])
+
 # How to read stored content back
-urls = client.get_file_urls(receipt.id, uploaded["filename"])
+file_urls = client.get_file_urls(receipt.id, uploaded["filename"])
 
 # 8. Download data
-data = client.download_bytes(urls.download_url)
+data = client.download_bytes(file_urls.download_url)
+
+# How to view/render retrieved object
+downloaded_file = Path("~/Downloads/nukez_report.pdf").expanduser()
+downloaded_file.parent.mkdir(parents=True, exist_ok=True)
+downloaded_file.write_bytes(data)
+webbrowser.open(downloaded_file.as_uri())
 ```
 
 ---

@@ -125,8 +125,8 @@ class Nukez:
         # File operations (require receipt_id)
         manifest = client.provision_locker(receipt.id)
         uploaded = client.upload_file_path(receipt.id, "~/Documents/report.pdf")
-        urls = client.get_file_urls(receipt.id, uploaded["filename"])
-        data = client.download_bytes(urls.download_url)
+        file_urls = client.get_file_urls(receipt.id, uploaded["filename"])
+        data = client.download_bytes(file_urls.download_url)
     
     Note:
         Most file operations require receipt_id (not locker_id) because the 
@@ -3743,7 +3743,6 @@ class Nukez:
             errors=errors,
             files=files_out,
         )
-
 
 
 

@@ -118,7 +118,7 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "4.0.9"
+__version__ = "4.0.10"
 
 __all__ = [
     # Main client
@@ -226,9 +226,9 @@ def get_agent_instructions() -> dict:
             "   # request.pay_asset to request.pay_to_address on request.network.",
             "4. receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)",
             "5. manifest = client.provision_locker(receipt.id)",
-            "6. urls = client.create_file(receipt.id, 'data.txt')",
-            "7. client.upload_bytes(urls.upload_url, b'Hello!')",
-            "8. data = client.download_bytes(urls.download_url)"
+            "6. uploaded = client.upload_file_path(receipt.id, '~/Documents/report.pdf')",
+            "7. file_urls = client.get_file_urls(receipt.id, uploaded['filename'])",
+            "8. data = client.download_bytes(file_urls.download_url)"
         ],
 
         "payment_flow": {

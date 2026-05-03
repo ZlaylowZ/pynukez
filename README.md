@@ -26,6 +26,7 @@ The PyNukez SDK does not execute blockchain payments. That boundary is intention
 ## 30-Second Example
 
 ```python
+import webbrowser
 from pathlib import Path
 from pynukez import Nukez
 
@@ -67,9 +68,23 @@ uploaded = client.upload_file_path(
     content_type="application/pdf",
 )
 
+# Large or long-running upload option:
+# job = client.start_bulk_upload_job(
+#     receipt.id,
+#     sources=[{"filepath": str(local_file), "content_type": "application/pdf"}],
+#     workers=1,
+# )
+# status = client.get_upload_job(job["job_id"])
+
 # How to read stored content back
-urls = client.get_file_urls(receipt.id, uploaded["filename"])
-data = client.download_bytes(urls.download_url)
+file_urls = client.get_file_urls(receipt.id, uploaded["filename"])
+data = client.download_bytes(file_urls.download_url)
+
+# How to view/render retrieved object
+downloaded_file = Path("~/Downloads/nukez_report.pdf").expanduser()
+downloaded_file.parent.mkdir(parents=True, exist_ok=True)
+downloaded_file.write_bytes(data)
+webbrowser.open(downloaded_file.as_uri())
 ```
 
 ### Async version
@@ -100,7 +115,7 @@ async with AsyncNukez(
 | Batch upload | `client.bulk_upload_paths(receipt.id, [{"filepath": "a.pdf"}, {"filepath": "b.txt"}])` |
 | Store directory | `client.upload_directory(receipt.id, "/path/to/dir", pattern="*.pdf", recursive=True)` |
 | Confirm hash | `client.confirm_file(receipt.id, "file.txt", confirm_url=urls.confirm_url)` |
-| Get data | `data = client.download_bytes(urls.download_url)` |
+| Get data | `file_urls = client.get_file_urls(receipt.id, "file.txt")` then `client.download_bytes(file_urls.download_url)` |
 | List files | `files = client.list_files(receipt.id)` |
 | Delete file | `client.delete_file(receipt.id, "file.txt")` |
 | Receipt hash | `check = client.verify_receipt_hash(receipt.id)` |

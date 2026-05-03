@@ -13,8 +13,8 @@ Usage:
 
         manifest = await client.provision_locker(receipt.id)
         uploaded = await client.upload_file_path(receipt.id, "~/Documents/report.pdf")
-        urls = await client.get_file_urls(receipt.id, uploaded["filename"])
-        data = await client.download_bytes(urls.download_url)
+        file_urls = await client.get_file_urls(receipt.id, uploaded["filename"])
+        data = await client.download_bytes(file_urls.download_url)
 """
 
 import asyncio

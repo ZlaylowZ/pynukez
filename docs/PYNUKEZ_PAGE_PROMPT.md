@@ -26,7 +26,7 @@ The page should match the existing design language while serving as both a marke
 **One-liner**: `Pay with SOL or MON. Store anything. Get a cryptographic receipt. Verify independently.`
 
 **Key stats row** (pill/badge components):
-- `v4.0.9`
+- `v4.0.10`
 - `Python 3.9+`
 - `MIT License`
 - `pip install pynukez`
@@ -56,6 +56,7 @@ Core dependencies: `httpx`, `pynacl`, `base58` (no pydantic, no python-dotenv).
 A full-width, syntax-highlighted code card showing the 8-step flow. This is the most important content on the page -- it should be immediately visible and copy-pasteable.
 
 ```python
+import webbrowser
 from pathlib import Path
 from pynukez import Nukez
 
@@ -91,11 +92,25 @@ uploaded = client.upload_file_path(
     content_type="application/pdf",
 )
 
+# Large or long-running upload option:
+# job = client.start_bulk_upload_job(
+#     receipt.id,
+#     sources=[{"filepath": str(local_file), "content_type": "application/pdf"}],
+#     workers=1,
+# )
+# status = client.get_upload_job(job["job_id"])
+
 # How to read stored content back
-urls = client.get_file_urls(receipt.id, uploaded["filename"])
+file_urls = client.get_file_urls(receipt.id, uploaded["filename"])
 
 # 8. Download data
-data = client.download_bytes(urls.download_url)
+data = client.download_bytes(file_urls.download_url)
+
+# How to view/render retrieved object
+downloaded_file = Path("~/Downloads/nukez_report.pdf").expanduser()
+downloaded_file.parent.mkdir(parents=True, exist_ok=True)
+downloaded_file.write_bytes(data)
+webbrowser.open(downloaded_file.as_uri())
 ```
 
 Below the code block, a callout:
@@ -453,7 +468,7 @@ A compact FAQ/accordion component:
 
 ## Content Accuracy Notes
 
-These facts are verified against the source code (pynukez v4.0.9) and must be presented accurately:
+These facts are verified against the source code (pynukez v4.0.10) and must be presented accurately:
 
 1. **Python >= 3.9** (not 3.11+)
 2. **Core deps**: `httpx`, `pynacl`, `base58` (NOT pydantic, NOT python-dotenv, NOT requests)
