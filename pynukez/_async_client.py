@@ -8,12 +8,12 @@ reused directly from the sync client and auth modules.
 Usage:
     async with AsyncNukez(keypair_path="~/.config/solana/id.json") as client:
         request = await client.request_storage(units=1)
-        # ... user executes the transfer externally (wallet, CLI) ...
+        # ... complete transfer via preferred method ...
         receipt = await client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)
 
         manifest = await client.provision_locker(receipt.id)
-        urls = await client.create_file(receipt.id, "data.txt")
-        await client.upload_bytes(urls.upload_url, b"Hello!")
+        uploaded = await client.upload_file_path(receipt.id, "~/Documents/report.pdf")
+        urls = await client.get_file_urls(receipt.id, uploaded["filename"])
         data = await client.download_bytes(urls.download_url)
 """
 

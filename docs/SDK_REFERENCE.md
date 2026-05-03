@@ -55,10 +55,11 @@ Requires Python 3.9+. Supported on macOS, Linux, and Windows.
 ## Quick Start
 
 ```python
+from pathlib import Path
 from pynukez import Nukez
 
 client = Nukez(
-    keypair_path="~/.config/solana/id.json",  # optional local signer path
+    keypair_path="~/.config/solana/id.json",  # local Ed25519 envelope signer
 )
 
 # 1. Check pricing
@@ -70,22 +71,29 @@ print(request.next_step)
 # -> "Transfer 0.001 SOL to <addr> on solana-devnet, then call
 #     confirm_storage(pay_req_id='...', tx_sig=<your_tx_signature>)"
 
-# 3. Complete the transfer with your wallet, CLI, signer, or custody workflow.
-#    PyNukez gives you the payment instructions and verifies the signature.
-tx_sig = "..."  # from your wallet / RPC / CLI
+# Using the x402 payment details assigned to the request variable
+# Complete transfer via preferred method
+# Assign transaction signature from above transfer to variable like so:
+tx_sig = "..."
 
-# 4. Confirm payment and get receipt
+# Issue receipt object by confirming payment with the Nukez Gateway
 receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
 # SAVE receipt.id - you need it for everything!
 
-# 5. Provision a locker (one-time per receipt)
+# Provision storage locker instance via the receipt
 manifest = client.provision_locker(receipt.id)
 
-# 6. Create a file and get signed URLs
-urls = client.create_file(receipt.id, "notes.txt")
+# Upload an actual local file by path
+#    PyNukez reads bytes from disk; file contents do not pass through prompt context.
+local_file = Path("~/Documents/report.pdf").expanduser()
+uploaded = client.upload_file_path(
+    receipt.id,
+    str(local_file),
+    content_type="application/pdf",
+)
 
-# 7. Upload data
-client.upload_bytes(urls.upload_url, b"Hello from an agent!")
+# 7. Fetch fresh signed URLs when you want to read it back
+urls = client.get_file_urls(receipt.id, uploaded["filename"])
 
 # 8. Download data
 data = client.download_bytes(urls.download_url)
@@ -101,7 +109,7 @@ data = client.download_bytes(urls.download_url)
 from pynukez import AsyncNukez
 
 async with AsyncNukez(
-    keypair_path="~/.config/solana/id.json",  # optional local signer path
+    keypair_path="~/.config/solana/id.json",  # local Ed25519 envelope signer
 ) as client:
     price = await client.get_price()
     request = await client.request_storage(units=1)
@@ -144,10 +152,11 @@ client = Nukez(signing_key=my_custom_signer)
 
 ### Constructor Parameters
 
-`keypair_path` is optional. It is wired in for local scripts and agents that
-want PyNukez to sign gateway envelopes from a Solana CLI keypair file. You can
-instead pass an explicit `signing_key` or use another signer bridge. Nukez does
-not custody, receive, or store client keypair material.
+`keypair_path` is one supported signer source. Use it when local scripts or
+agents should sign protected gateway envelopes from a Solana CLI keypair file.
+For protected locker/file operations, PyNukez still needs a signer source:
+`keypair_path`, `evm_private_key_path`, or an explicit `signing_key`. Nukez
+does not custody, receive, or store client keypair material.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -162,11 +171,11 @@ not custody, receive, or store client keypair material.
 Both clients support context managers:
 
 ```python
-with Nukez(keypair_path="~/.config/solana/id.json") as client:  # keypair_path is optional
+with Nukez(keypair_path="~/.config/solana/id.json") as client:  # local Ed25519 envelope signer
     ...
 
 # or
-client = Nukez(keypair_path="~/.config/solana/id.json")  # keypair_path is optional
+client = Nukez(keypair_path="~/.config/solana/id.json")  # local Ed25519 envelope signer
 try:
     ...
 finally:

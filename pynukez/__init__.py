@@ -17,7 +17,7 @@ Quick Start (sync):
 
     client = Nukez(keypair_path=KEYPAIR_PATH)
     request = client.request_storage(units=1)
-    # ... user executes the transfer externally ...
+    # ... complete transfer via preferred method ...
     receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)
 
 Quick Start (async):
@@ -25,7 +25,7 @@ Quick Start (async):
 
     async with AsyncNukez(keypair_path=KEYPAIR_PATH) as client:
         request = await client.request_storage(units=1)
-        # ... user executes the transfer externally ...
+        # ... complete transfer via preferred method ...
         receipt = await client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)
 """
 
@@ -118,7 +118,7 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "4.0.7"
+__version__ = "4.0.8"
 
 __all__ = [
     # Main client

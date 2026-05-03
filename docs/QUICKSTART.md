@@ -44,7 +44,7 @@ signer, use that instead.
 from pynukez import Nukez
 
 client = Nukez(
-    keypair_path="~/.config/solana/id.json",  # optional local signer path
+    keypair_path="~/.config/solana/id.json",  # local Ed25519 envelope signer
 )
 
 # Check price (no payment or on-chain activity)

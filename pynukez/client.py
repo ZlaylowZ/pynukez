@@ -119,13 +119,13 @@ class Nukez:
         # Payment flow: PyNukez does not execute transfers. Use your wallet,
         # CLI, or signer, then pass the tx signature back to confirm.
         request = client.request_storage(units=1)
-        # ... user executes the transfer externally (wallet, CLI, another tool) ...
+        # ... complete transfer via preferred method ...
         receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)
 
         # File operations (require receipt_id)
         manifest = client.provision_locker(receipt.id)
-        urls = client.create_file(receipt.id, "data.txt")
-        client.upload_bytes(urls.upload_url, b"Hello!")
+        uploaded = client.upload_file_path(receipt.id, "~/Documents/report.pdf")
+        urls = client.get_file_urls(receipt.id, uploaded["filename"])
         data = client.download_bytes(urls.download_url)
     
     Note:
@@ -3743,7 +3743,6 @@ class Nukez:
             errors=errors,
             files=files_out,
         )
-
 
 
 

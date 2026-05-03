@@ -8,16 +8,17 @@ The main client. Initialize once, use everywhere.
 from pynukez import Nukez
 
 client = Nukez(
-    keypair_path="~/.config/solana/id.json",  # Optional local signer path
+    keypair_path="~/.config/solana/id.json",  # Local Ed25519 envelope signer
     network="devnet",                          # or "mainnet-beta"
     base_url="https://api.nukez.xyz"        # Optional
 )
 ```
 
-`keypair_path` is not required. It is a convenience for local scripts and
-agents that want PyNukez to sign gateway envelopes from a key file. You can use
-another signer implementation instead, and Nukez does not custody, receive, or
-store client keypair material.
+`keypair_path` is one supported signer source. Use it when local scripts or
+agents should sign protected gateway envelopes from a Solana keypair file. For
+protected locker/file operations, PyNukez still needs a signer source:
+`keypair_path`, `evm_private_key_path`, or an explicit `signing_key`. Nukez
+does not custody, receive, or store client keypair material.
 
 ---
 

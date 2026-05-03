@@ -26,14 +26,15 @@ The PyNukez SDK does not execute blockchain payments. That boundary is intention
 ## 30-Second Example
 
 ```python
+from pathlib import Path
 from pynukez import Nukez
 
 # Instantiate an instance of the Nukez class.
-# keypair_path is optional. When set, PyNukez uses this local keypair only
-# to sign gateway envelopes for protected locker/file calls; PyNukez does
-# not use it to execute cryptographic payment transfers.
+# keypair_path is one supported signer source. Use it when you want PyNukez
+# to sign protected gateway envelopes with a local Solana keypair.
+# Omit it only when providing signing_key or evm_private_key_path instead.
 client = Nukez(
-    keypair_path="~/.config/solana/id.json",  # optional local signer path
+    keypair_path="~/.config/solana/id.json",  # local Ed25519 envelope signer
 )
 
 # Request the x402 payment instructions from the Nukez gateway.
@@ -46,17 +47,29 @@ print(request.next_step)
 # -> "Transfer 0.001 SOL to <addr> on solana-devnet,
 #     then call confirm_storage(pay_req_id='...', tx_sig=<your_tx_signature>)"
 
-# 2. Execute the transfer yourself (wallet, CLI, etc.), capture the tx signature.
-tx_sig = "..."  # from your wallet / RPC / CLI
+# Using the x402 payment details assigned to the request variable
+# Complete transfer via preferred method
+# Assign transaction signature from above transfer to variable like so:
+tx_sig = "..."
 
-# 3. Close the loop with the gateway
+# Issue receipt object by confirming payment with the Nukez Gateway
 receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
 
-# 4. Use the receipt
+# Provision storage locker instance via the receipt
 client.provision_locker(receipt.id)
-urls = client.create_file(receipt.id, "notes.txt")
-client.upload_bytes(urls.upload_url, b"Hello!")
-data = client.download_bytes(urls.download_url)  # b"Hello!"
+
+# Upload an actual local file by path. PyNukez reads bytes from disk;
+# the file contents do not need to pass through your prompt or notebook.
+local_file = Path("~/Documents/report.pdf").expanduser()
+uploaded = client.upload_file_path(
+    receipt.id,
+    str(local_file),
+    content_type="application/pdf",
+)
+
+# Fetch fresh URLs when you want to read it back.
+urls = client.get_file_urls(receipt.id, uploaded["filename"])
+data = client.download_bytes(urls.download_url)
 ```
 
 ### Async version
@@ -65,7 +78,7 @@ data = client.download_bytes(urls.download_url)  # b"Hello!"
 from pynukez import AsyncNukez
 
 async with AsyncNukez(
-    keypair_path="~/.config/solana/id.json",  # optional local signer path
+    keypair_path="~/.config/solana/id.json",  # local Ed25519 envelope signer
 ) as client:
     request = await client.request_storage(units=1)
     # ... execute the transfer externally ...

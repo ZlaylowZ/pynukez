@@ -26,7 +26,7 @@ The page should match the existing design language while serving as both a marke
 **One-liner**: `Pay with SOL or MON. Store anything. Get a cryptographic receipt. Verify independently.`
 
 **Key stats row** (pill/badge components):
-- `v4.0.7`
+- `v4.0.8`
 - `Python 3.9+`
 - `MIT License`
 - `pip install pynukez`
@@ -56,10 +56,11 @@ Core dependencies: `httpx`, `pynacl`, `base58` (no pydantic, no python-dotenv).
 A full-width, syntax-highlighted code card showing the 8-step flow. This is the most important content on the page -- it should be immediately visible and copy-pasteable.
 
 ```python
+from pathlib import Path
 from pynukez import Nukez
 
 client = Nukez(
-    keypair_path="~/.config/solana/id.json",  # optional local signer path
+    keypair_path="~/.config/solana/id.json",  # local Ed25519 envelope signer
 )
 
 # 1. Check pricing
@@ -69,22 +70,29 @@ price = client.get_price()
 #    Complete payment with your own wallet, CLI, signer, or custody workflow.
 request = client.request_storage(units=1)
 
-# 3. Execute the transfer externally (wallet, CLI, another tool).
-#    Capture the resulting transaction signature.
-tx_sig = "..."  # from your wallet / RPC / CLI
+# Using the x402 payment details assigned to the request variable
+# Complete transfer via preferred method
+# Assign transaction signature from above transfer to variable like so:
+tx_sig = "..."
 
-# 4. Confirm payment and get receipt
+# Issue receipt object by confirming payment with the Nukez Gateway
 receipt = client.confirm_storage(request.pay_req_id, tx_sig=tx_sig)
 # SAVE receipt.id - you need it for everything!
 
-# 5. Provision a locker (one-time per receipt)
+# Provision storage locker instance via the receipt
 manifest = client.provision_locker(receipt.id)
 
-# 6. Create a file and get signed URLs
-urls = client.create_file(receipt.id, "notes.txt")
+# Upload an actual local file by path
+#    PyNukez reads bytes from disk; file contents do not pass through prompt context.
+local_file = Path("~/Documents/report.pdf").expanduser()
+uploaded = client.upload_file_path(
+    receipt.id,
+    str(local_file),
+    content_type="application/pdf",
+)
 
-# 7. Upload data
-client.upload_bytes(urls.upload_url, b"Hello from an agent!")
+# 7. Fetch fresh signed URLs when you want to read it back
+urls = client.get_file_urls(receipt.id, uploaded["filename"])
 
 # 8. Download data
 data = client.download_bytes(urls.download_url)
@@ -212,7 +220,7 @@ Side-by-side code comparison (two-column layout or toggle):
 ```python
 from pynukez import Nukez
 
-with Nukez(keypair_path="key.json") as client:  # keypair_path is optional
+with Nukez(keypair_path="key.json") as client:  # local Ed25519 envelope signer
     files = client.list_files(receipt_id)
 ```
 
@@ -220,7 +228,7 @@ with Nukez(keypair_path="key.json") as client:  # keypair_path is optional
 ```python
 from pynukez import AsyncNukez
 
-async with AsyncNukez(keypair_path="key.json") as client:  # keypair_path is optional
+async with AsyncNukez(keypair_path="key.json") as client:  # local Ed25519 envelope signer
     files = await client.list_files(receipt_id)
 ```
 
@@ -390,9 +398,14 @@ client = Nukez(signing_key=my_custom_signer)
 
 Constructor parameter table:
 
+Make the signer boundary explicit near this table: `keypair_path` is one
+supported signer source, not a requirement and not magic signing. Protected
+locker/file operations still require a signer source: `keypair_path`,
+`evm_private_key_path`, or an explicit `signing_key`.
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `keypair_path` | -- | Optional local Ed25519 keypair JSON for envelope signing |
+| `keypair_path` | -- | Local Ed25519 keypair JSON for envelope signing |
 | `base_url` | `https://api.nukez.xyz` | Gateway API URL |
 | `network` | `"devnet"` | `"devnet"` or `"mainnet-beta"` |
 | `evm_private_key_path` | -- | EVM private key for secp256k1 envelope signing |
@@ -440,7 +453,7 @@ A compact FAQ/accordion component:
 
 ## Content Accuracy Notes
 
-These facts are verified against the source code (pynukez v4.0.7) and must be presented accurately:
+These facts are verified against the source code (pynukez v4.0.8) and must be presented accurately:
 
 1. **Python >= 3.9** (not 3.11+)
 2. **Core deps**: `httpx`, `pynacl`, `base58` (NOT pydantic, NOT python-dotenv, NOT requests)
