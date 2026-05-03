@@ -116,8 +116,8 @@ class Nukez:
     Basic Usage:
         client = Nukez(keypair_path="~/.config/solana/id.json")
 
-        # Payment flow (the SDK does NOT move funds — you pay out-of-band
-        # and hand us the tx signature to confirm)
+        # Payment flow: PyNukez does not execute transfers. Use your wallet,
+        # CLI, or signer, then pass the tx signature back to confirm.
         request = client.request_storage(units=1)
         # ... user executes the transfer externally (wallet, CLI, another tool) ...
         receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)
@@ -157,8 +157,7 @@ class Nukez:
             timeout: HTTP timeout in seconds
             evm_private_key_path: Path to EVM private key JSON file.
                 The EVM key is used for secp256k1 envelope signing on
-                EVM-paid lockers. Does NOT move funds — pynukez no longer
-                executes transfers.
+                EVM-paid lockers. It is not used to execute transfers.
             evm_rpc_url: Reserved; currently unused at the SDK layer.
             auto_bind_operator: When True (default), auto-bind Ed25519
                 keypair as operator on EVM-paid lockers at confirm time.
@@ -523,11 +522,11 @@ class Nukez:
         """
         Step 1: Start the x402 payment flow and receive payment instructions.
 
-        pynukez does NOT move funds. This call asks the gateway for a quote
-        and returns a StorageRequest describing where to pay, how much, and
-        on which chain. The caller then executes the transfer out-of-band
-        (wallet, CLI, hardware signer, another tool) and hands the resulting
-        tx signature to confirm_storage().
+        PyNukez does not execute blockchain payments. This call asks the
+        gateway for a quote and returns a StorageRequest describing where to
+        pay, how much, and on which chain. Use your own wallet, CLI, hardware
+        signer, or custody workflow to complete the transfer, then submit the
+        resulting tx signature to confirm_storage().
 
         Args:
             units: Number of storage units to purchase.
@@ -696,8 +695,9 @@ class Nukez:
         Args:
             pay_req_id: Payment request ID from request_storage().
             tx_sig: On-chain transaction signature for the payment.
-                You execute the transfer externally (wallet, CLI, etc.) and
-                hand us the signature — pynukez does not move funds.
+                You execute the transfer with your wallet, CLI, or signing
+                workflow, then submit the resulting signature. PyNukez does
+                not execute transfers.
             max_retries: Maximum retry attempts for tx_not_found / retryable
                 402 responses (default: 5).
             initial_delay: Initial delay in seconds, doubles each retry (default: 2.0).
@@ -3743,9 +3743,6 @@ class Nukez:
             errors=errors,
             files=files_out,
         )
-
-
-
 
 
 

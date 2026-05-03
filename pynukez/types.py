@@ -41,9 +41,9 @@ class StorageRequest:
     terms: Optional[Dict[str, Any]] = None                    # storage limits, TTL, file limits
     price_breakdown: Optional[Dict[str, Any]] = None          # cost components from price object
 
-    # Guide agent to next step. pynukez does not move funds — the agent is
-    # expected to execute the transfer out-of-band (wallet, CLI, another
-    # tool) and hand the resulting tx signature to confirm_storage().
+    # Guide agent to next step. PyNukez does not execute transfers; the
+    # agent should use the chosen wallet, CLI, signer, or custody workflow,
+    # then submit the resulting tx signature to confirm_storage().
     next_step: str = ""
 
     @property

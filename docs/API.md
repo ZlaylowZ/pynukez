@@ -25,7 +25,9 @@ store client keypair material.
 
 ### `request_storage(units=1)`
 
-Start the payment process. Returns payment instructions — pynukez does not move funds.
+Start the payment process. Returns x402 payment instructions. Complete the
+transfer with your own wallet, CLI, signer, or custody workflow, then submit
+the resulting transaction signature to confirm storage.
 
 ```python
 request = client.request_storage(units=1)
@@ -317,7 +319,7 @@ Contract details:
 
 Important:
 - Viewer links are canonical-manifest views.
-- Objects uploaded out-of-band (for example, directly in cloud console) are intentionally not included.
+- Objects uploaded outside the Nukez upload flow (for example, directly in a cloud console) are intentionally not included.
 
 ### `get_file_viewer_url(receipt_id, filename, viewer_base_url="https://nukez.xyz", ttl_min=30, include_download_url=True)`
 

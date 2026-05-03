@@ -1,6 +1,6 @@
 # PyNukez
 
-**Persistent storage for AI agents. Store anything, get a cryptographic receipt. pynukez does not move funds — you pay out-of-band and hand us the tx signature to confirm.**
+**Persistent storage for AI agents. Store anything, receive a cryptographic receipt, and confirm payment with the transaction signature from your own wallet, CLI, or signing workflow. PyNukez never executes transfers or takes custody of keys.**
 
 [![PyPI](https://img.shields.io/pypi/v/pynukez.svg)](https://pypi.org/project/pynukez/)
 [![Python](https://img.shields.io/pypi/pyversions/pynukez.svg)](https://pypi.org/project/pynukez/)
@@ -17,11 +17,11 @@ Requires Python 3.9+.
 ## How it works
 
 1. `request_storage()` asks the gateway for a quote. You receive payment instructions — address, amount, asset, chain.
-2. **You execute the transfer yourself** — wallet, CLI, another tool, a hardware signer, whatever. pynukez does not touch your funds.
+2. **You execute the transfer with your own wallet, CLI, hardware signer, or signing workflow.** PyNukez never touches funds or custody keys.
 3. `confirm_storage(pay_req_id, tx_sig=<your_tx_sig>)` closes the loop and returns a receipt.
 4. Use the receipt to provision a locker and upload / download / verify files.
 
-The PyNukez SDK does not support cryptographic payment transfers. This is a conscious design decision to encourage prudent keypair management and security. Please visit https://nukez.xyz/docs/pynukez/helpers for examples and external helpers to facilitate cryptographic operations for agentic workflows.
+The PyNukez SDK does not execute blockchain payments. That boundary is intentional: payment keys stay in the wallet, CLI, signer, or custody system you choose. Please visit https://nukez.xyz/docs/pynukez/helpers for examples and external helpers to facilitate cryptographic operations for agentic workflows.
 
 ## 30-Second Example
 

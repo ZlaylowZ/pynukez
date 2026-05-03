@@ -26,7 +26,7 @@ The page should match the existing design language while serving as both a marke
 **One-liner**: `Pay with SOL or MON. Store anything. Get a cryptographic receipt. Verify independently.`
 
 **Key stats row** (pill/badge components):
-- `v4.0.6`
+- `v4.0.7`
 - `Python 3.9+`
 - `MIT License`
 - `pip install pynukez`
@@ -65,8 +65,8 @@ client = Nukez(
 # 1. Check pricing
 price = client.get_price()
 
-# 2. Request storage (returns payment instructions —
-#    pynukez does NOT move funds)
+# 2. Request storage (returns x402 payment instructions).
+#    Complete payment with your own wallet, CLI, signer, or custody workflow.
 request = client.request_storage(units=1)
 
 # 3. Execute the transfer externally (wallet, CLI, another tool).
@@ -146,8 +146,8 @@ A 2x3 or 3x2 grid of feature cards. Each card has an icon, title, and 1-2 line d
 **Card 1: Agent-Native Design**
 Every method is a self-contained tool. Explicit parameters, predictable dataclass returns, no hidden state. Built for LLM tool-calling patterns.
 
-**Card 2: Multi-Chain, SDK-Out-Of-Band**
-Pay with SOL on Solana or MON/WETH on Monad. pynukez does NOT move funds — it tells you what to pay, you sign externally, it confirms. Ed25519 + secp256k1 envelope signing.
+**Card 2: Multi-Chain Payment Boundary**
+Pay with SOL on Solana or MON/WETH on Monad. PyNukez provides the quote and confirms the transaction signature; your wallet, CLI, signer, or custody workflow executes the transfer. Ed25519 + secp256k1 envelope signing.
 
 **Card 3: Cryptographic Verification**
 SHA-256 content hashes, merkle tree attestation, on-chain anchoring via Switchboard. Independently verifiable without trusting anyone.
@@ -170,7 +170,7 @@ A compact, scannable table showing the most common operations. Use a monospace c
 | What you want | Code |
 |---------------|------|
 | Buy storage | `request = client.request_storage()` |
-| Pay | Execute the transfer externally (wallet, CLI, another tool) — pynukez does not move funds |
+| Pay | Complete the transfer with your own wallet, CLI, hardware signer, or custody workflow |
 | Get receipt | `receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_sig>)` |
 | Setup locker | `client.provision_locker(receipt.id)` |
 | Store bytes | `urls = client.create_file(receipt.id, "f.txt")` then `client.upload_bytes(urls.upload_url, data)` |
@@ -422,7 +422,7 @@ A compact FAQ/accordion component:
 | Problem | Fix |
 |---------|-----|
 | "Transaction not found" | Wait 3 seconds, retry `confirm_storage()` (auto-retries 5x) |
-| Transfer tooling (external) | Use your wallet, CLI, or preferred signer — pynukez does not move funds |
+| Transfer tooling | Use your own wallet, CLI, preferred signer, or custody workflow |
 | "URL expired" | `client.get_file_urls(receipt_id, filename)` for fresh URLs |
 | "File not found" | Check `client.list_files(receipt_id)` |
 | "Locker not provisioned" | Call `client.provision_locker(receipt_id)` first |
@@ -440,7 +440,7 @@ A compact FAQ/accordion component:
 
 ## Content Accuracy Notes
 
-These facts are verified against the source code (pynukez v4.0.6) and must be presented accurately:
+These facts are verified against the source code (pynukez v4.0.7) and must be presented accurately:
 
 1. **Python >= 3.9** (not 3.11+)
 2. **Core deps**: `httpx`, `pynacl`, `base58` (NOT pydantic, NOT python-dotenv, NOT requests)

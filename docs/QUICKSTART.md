@@ -11,8 +11,9 @@ You need two things:
    You can also provide another signer bridge instead. Nukez does not custody,
    receive, or store client keypair material.
 
-pynukez does NOT move funds. You execute payments out-of-band (wallet,
-CLI, hardware signer, etc.) and hand us the resulting tx signature.
+PyNukez does not execute blockchain payments. Complete the transfer with your
+own wallet, CLI, hardware signer, or custody workflow, then submit the
+resulting transaction signature to confirm storage.
 
 ## Step 1: Install
 

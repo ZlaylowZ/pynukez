@@ -70,8 +70,8 @@ print(request.next_step)
 # -> "Transfer 0.001 SOL to <addr> on solana-devnet, then call
 #     confirm_storage(pay_req_id='...', tx_sig=<your_tx_signature>)"
 
-# 3. Execute the transfer externally (wallet, CLI, another tool).
-#    pynukez does NOT move funds — it only tells you what to pay.
+# 3. Complete the transfer with your wallet, CLI, signer, or custody workflow.
+#    PyNukez gives you the payment instructions and verifies the signature.
 tx_sig = "..."  # from your wallet / RPC / CLI
 
 # 4. Confirm payment and get receipt
@@ -177,12 +177,12 @@ finally:
 
 ## Payment Flow (x402 Protocol)
 
-Nukez uses the x402 HTTP 402 Payment Required protocol. **pynukez does NOT move funds** — the SDK tells you what to pay and confirms you paid. You execute the transfer externally (wallet, CLI, another tool, hardware signer).
+Nukez uses the x402 HTTP 402 Payment Required protocol. **PyNukez does not execute blockchain payments** — the SDK tells you what to pay and confirms the transaction signature you provide. Complete the transfer with your own wallet, CLI, hardware signer, or custody workflow.
 
 The flow is always three explicit steps:
 
 1. **Request** -- `request_storage()` returns payment instructions (address, amount, asset, chain, `pay_req_id`)
-2. **Pay** -- You execute the transfer out-of-band and capture the tx signature
+2. **Pay** -- Complete the transfer with your own payment tool and capture the tx signature
 3. **Confirm** -- `confirm_storage()` presents `pay_req_id` + your tx signature, gateway verifies on-chain, returns receipt
 
 The receipt is the root credential. All subsequent operations require the `receipt_id`.
@@ -214,7 +214,7 @@ request.next_step        # Human-readable guidance for the agent
 
 #### Executing the payment
 
-pynukez 4.0.0 removed `solana_transfer()` and `evm_transfer()`. The SDK intentionally does not handle private-key-holding transfer execution. Use your preferred tool to move funds:
+PyNukez 4.0.0 removed `solana_transfer()` and `evm_transfer()`. The SDK intentionally leaves transfer execution to your own wallet, CLI, hardware signer, or custody workflow:
 
 - **Solana**: `solana transfer`, a wallet (Phantom, Backpack, Solflare), or a signing relay
 - **EVM (Monad, etc.)**: MetaMask, `cast send`, `web3.py`, a wallet/relay, or a hardware signer
@@ -1088,7 +1088,7 @@ print(instructions["quickstart_flow"])
 | What you want | Code |
 |---------------|------|
 | Buy storage | `request = client.request_storage()` |
-| Pay | Execute the transfer externally (wallet, CLI, another tool) — pynukez does not move funds |
+| Pay | Complete the transfer with your own wallet, CLI, hardware signer, or custody workflow |
 | Get receipt | `receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_sig>)` |
 | Setup locker | `client.provision_locker(receipt.id)` |
 | Store bytes | `urls = client.create_file(receipt.id, "f.txt")` then `client.upload_bytes(urls.upload_url, data)` |

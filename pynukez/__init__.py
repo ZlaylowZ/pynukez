@@ -7,10 +7,10 @@ This SDK is designed for autonomous AI agents that need persistent storage
 with cryptographic receipts. Every function is tool-shaped and stateless —
 perfect for LLM tool-calling patterns.
 
-pynukez does NOT move funds. request_storage() returns payment instructions
-(address, amount, chain, asset). You execute the transfer out-of-band
-(wallet, CLI, another tool) and hand the resulting transaction signature
-to confirm_storage() to close the payment loop.
+PyNukez does not execute blockchain payments. request_storage() returns
+payment instructions (address, amount, chain, asset). You complete the
+transfer with your own wallet, CLI, signer, or custody workflow, then submit
+the resulting transaction signature to confirm_storage().
 
 Quick Start (sync):
     from pynukez import Nukez
@@ -118,7 +118,7 @@ from .discovery import (
     get_current_price,
 )
 
-__version__ = "4.0.6"
+__version__ = "4.0.7"
 
 __all__ = [
     # Main client
@@ -221,8 +221,8 @@ def get_agent_instructions() -> dict:
         "quickstart_flow": [
             "1. client = Nukez(keypair_path='~/.config/solana/id.json')",
             "2. request = client.request_storage(units=1)",
-            "3. # Execute the transfer yourself — pynukez does NOT move funds.",
-            "   # Use your wallet, CLI, or another tool to send request.amount",
+            "3. # Complete the transfer with your own wallet, CLI, signer, or custody workflow.",
+            "   # Send request.amount",
             "   # request.pay_asset to request.pay_to_address on request.network.",
             "4. receipt = client.confirm_storage(request.pay_req_id, tx_sig=<your_tx_signature>)",
             "5. manifest = client.provision_locker(receipt.id)",
@@ -273,8 +273,8 @@ def get_agent_instructions() -> dict:
                 "health_check": "Verify API availability"
             },
             "payment": {
-                "request_storage": "Start x402 payment flow — returns payment instructions with payment_options. pynukez does NOT move funds; you execute the transfer externally.",
-                "confirm_storage": "Confirm payment and get receipt (SAVE receipt.id!). Takes the tx_sig from the transfer you executed out-of-band.",
+                "request_storage": "Start x402 payment flow — returns payment instructions with payment_options. PyNukez does not execute transfers; use your own wallet, CLI, or signer.",
+                "confirm_storage": "Confirm payment and get receipt (SAVE receipt.id!). Takes the tx_sig from the transfer you completed with your own payment tool.",
                 "get_provider_info": "Check provider capabilities and limits before selecting",
             },
             "storage": {
@@ -441,7 +441,7 @@ def get_tool_definitions() -> list:
                         },
                         "tx_sig": {
                             "type": "string",
-                            "description": "On-chain transaction signature for the payment you executed externally (pynukez does not move funds)"
+                            "description": "On-chain transaction signature from the payment you completed with your own wallet, CLI, or signer"
                         }
                     },
                     "required": ["pay_req_id", "tx_sig"]
