@@ -249,9 +249,9 @@ client = Nukez(keypair_path="~/.config/solana/id.json", network="mainnet-beta")
 
 ## Links
 
-- [Full SDK Reference](https://github.com/Nukez-xyz/pynukez/blob/main/docs/SDK_REFERENCE.md) — Every method, type, and error documented
-- [Examples](https://github.com/Nukez-xyz/pynukez/tree/main/examples) — Working code you can copy
-- [PyPI](https://pypi.org/project/pynukez/) — Published releases
+- [Full SDK Reference](https://nukez.xyz/docs/pynukez/reference) — Every method, type, and error documented
+- [Examples](https://nukez.xyz/docs/pynukez/examples) — Working code and usage flows
+- [Python Helpers](https://nukez.xyz/docs/pynukez/helpers) — External payment helper guidance
 - [GitHub](https://github.com/Nukez-xyz/pynukez) — Source code, issues, releases
 - [Contributing](https://github.com/Nukez-xyz/pynukez/blob/main/CONTRIBUTING.md) — Dev setup and PR workflow
 

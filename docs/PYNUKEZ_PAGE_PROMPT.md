@@ -26,7 +26,7 @@ The page should match the existing design language while serving as both a marke
 **One-liner**: `Pay with SOL or MON. Store anything. Get a cryptographic receipt. Verify independently.`
 
 **Key stats row** (pill/badge components):
-- `v4.0.12`
+- `v4.0.13`
 - `Python 3.9+`
 - `MIT License`
 - `pip install pynukez`
@@ -463,13 +463,13 @@ A compact FAQ/accordion component:
 
 **Headline**: "Start building in 30 seconds"
 **Command**: `pip install pynukez` (with copy button)
-**Links row**: [GitHub](https://github.com/Nukez-xyz/pynukez) | [Full API Reference](docs/SDK_REFERENCE.md) | [Examples](https://github.com/Nukez-xyz/pynukez/tree/main/examples) | [PyPI](https://pypi.org/project/pynukez/)
+**Links row**: [PyNukez Docs](https://nukez.xyz/docs/pynukez) | [Full SDK Reference](https://nukez.xyz/docs/pynukez/reference) | [Examples](https://nukez.xyz/docs/pynukez/examples) | [Python Helpers](https://nukez.xyz/docs/pynukez/helpers) | [GitHub](https://github.com/Nukez-xyz/pynukez)
 
 ---
 
 ## Content Accuracy Notes
 
-These facts are verified against the source code (pynukez v4.0.12) and must be presented accurately:
+These facts are verified against the source code (pynukez v4.0.13) and must be presented accurately:
 
 1. **Python >= 3.9** (not 3.11+)
 2. **Core deps**: `httpx`, `pynacl`, `base58` (NOT pydantic, NOT python-dotenv, NOT requests)
