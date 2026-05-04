@@ -2,6 +2,8 @@
 LLM integration - use Nukez as tools for your AI agent.
 
 This example shows how to wire up Nukez with OpenAI function calling.
+PyNukez signs protected gateway envelopes, but it does not execute blockchain
+payments or take custody of payment keys.
 
 Run:
     pip install openai
@@ -17,31 +19,50 @@ import pynukez
 # Get tool definitions from SDK
 tools = pynukez.get_tool_definitions()
 
-# Your storage client
-storage = pynukez.Nukez(keypair_path="~/.config/solana/id.json")
-receipt_id = None  # Set this if you have existing storage
+# Your storage client.
+# keypair_path is one supported signer source for protected gateway envelopes.
+# It is not used by PyNukez to move funds.
+storage = pynukez.Nukez(keypair_path="~/.config/solana/id.json", network="devnet")
+receipt_id = None  # Set this to an existing receipt ID to reuse a locker.
 
 def run_tool(name, args):
     """Execute a Nukez tool."""
     global receipt_id
     
     if name == "nukez_request_storage":
-        r = storage.request_storage(args.get("units", 1))
+        r = storage.request_storage(
+            units=args.get("units", 1),
+            provider=args.get("provider", "gcs"),
+            pay_network=args.get("pay_network"),
+            pay_asset=args.get("pay_asset"),
+        )
         return {
             "pay_req_id": r.pay_req_id,
             "pay_to_address": r.pay_to_address,
             "amount_sol": r.amount_sol,
+            "amount_lamports": r.amount_lamports,
             "amount": r.amount,
+            "amount_raw": r.amount_raw,
             "pay_asset": r.pay_asset,
             "network": r.network,
+            "provider": r.provider,
+            "payment_options": r.payment_options,
+            "quote_expires_at": r.quote_expires_at,
             "next_step": r.next_step,
-            "note": "pynukez does not move funds. Execute the transfer externally and pass the tx signature to nukez_confirm_storage.",
+            "note": (
+                "PyNukez does not execute blockchain payments. Complete the "
+                "transfer with your wallet, CLI, signer, or custody workflow, "
+                "then pass the transaction signature to nukez_confirm_storage."
+            ),
         }
 
     elif name == "nukez_confirm_storage":
         r = storage.confirm_storage(args["pay_req_id"], args["tx_sig"])
         receipt_id = r.id
-        return {"receipt_id": r.id}
+        return {
+            "receipt_id": r.id,
+            "note": "Keep receipt_id as the primary SDK handle for this locker.",
+        }
     
     elif name == "nukez_provision_locker":
         storage.provision_locker(args.get("receipt_id") or receipt_id)
@@ -114,7 +135,10 @@ def run_tool(name, args):
 
     elif name == "nukez_download_bytes":
         data = storage.download_bytes(args["download_url"])
-        return {"data": data.decode()}
+        return {
+            "data": data.decode("utf-8", errors="replace"),
+            "note": "For binary or large files, prefer download_to_file() or a viewer handoff.",
+        }
     
     elif name == "nukez_list_files":
         files = storage.list_files(args.get("receipt_id") or receipt_id)
